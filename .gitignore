@@ -2,6 +2,7 @@
 __pycache__/
 *.py[codz]
 *$py.class
+.DS_Store
 
 # C extensions
 *.so
@@ -149,6 +150,9 @@ activemq-data/
 
 # Environments
 .env
+.env.local
+podcast-transcription-pipeline/.env
+podcast-transcription-pipeline/.env.local
 .envrc
 .venv
 env/
@@ -205,6 +209,15 @@ tempCodeRunnerFile.py
 
 # Ruff stuff:
 .ruff_cache/
+
+# Podcast transcription pipeline generated artifacts
+podcast-transcription-pipeline/**/chunk_*.mp3
+podcast-transcription-pipeline/**/chunks_manifest.jsonl
+podcast-transcription-pipeline/**/raw_asr.jsonl
+podcast-transcription-pipeline/**/raw_asr.md
+podcast-transcription-pipeline/test_transcribe/
+podcast-transcription-pipeline/test_transcribe/chunks/
+podcast-transcription-pipeline/test_transcribe/transcripts/
 
 # PyPI configuration file
 .pypirc

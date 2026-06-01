@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "podcast-transcription-pipeline"
+version = "0.1.0"
+description = "Local podcast audio chunking and OpenAI transcription CLI."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "openai>=1.0.0",
+]
+
+[project.scripts]
+podcast-transcriber = "podcast_transcriber.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -36,23 +36,35 @@ OpenAI transcription API, and merges raw output.
 
 ## Progress
 
-- [ ] Create a project-level `.venv` and document setup.
-- [ ] Create an installable Python CLI package.
-- [ ] Implement episode directory initialization and validation.
-- [ ] Implement fixed-length MP3 audio chunking with `ffmpeg`.
-- [ ] Write a JSONL chunk manifest with source metadata and timestamps.
-- [ ] Implement OpenAI transcription calls.
-- [ ] Make transcription resumable without accepting stale rows.
-- [ ] Implement Markdown merge output.
-- [ ] Add `.env.example`, `.gitignore`, README usage, and smoke tests.
-- [ ] Validate chunking with synthetic audio.
-- [ ] Validate transcription with a short real speech sample when an API key is available.
-- [ ] Update this ExecPlan with discoveries, decisions, and outcomes.
+- [x] Create a project-level `.venv` and document setup.
+- [x] Create an installable Python CLI package.
+- [x] Implement episode directory initialization and validation.
+- [x] Implement fixed-length MP3 audio chunking with `ffmpeg`.
+- [x] Write a JSONL chunk manifest with source metadata and timestamps.
+- [x] Implement OpenAI transcription calls.
+- [x] Make transcription resumable without accepting stale rows.
+- [x] Implement Markdown merge output.
+- [x] Add `.env.example`, `.gitignore`, README usage, and smoke tests.
+- [x] Validate chunking with synthetic audio.
+- [x] Validate transcription with a short real speech sample when an API key is available.
+- [x] Update this ExecPlan with discoveries, decisions, and outcomes.
 
 ## Surprises & Discoveries
 
-- Observation: None yet.
-  Evidence: Work has not started.
+- Observation: The repository already had an `OPENAI_API_KEY` in the process
+  environment, but the user requested a new project key.
+  Evidence: A new key named `podcast-learning-app Codex` was created through
+  the OpenAI Platform connector and written to `podcast-transcription-pipeline/.env`.
+
+- Observation: The real sample under `test_transcribe/` is a long file, not a
+  short fixture.
+  Evidence: `ffprobe` reported duration `12884.706168` seconds and size
+  `269359217` bytes.
+
+- Observation: One-minute chunking on the real sample produced 215 upload-sized
+  MP3 chunks.
+  Evidence: `podcast-transcriber chunk ... --chunk-seconds 60` wrote 215 rows
+  to `test_transcribe/transcripts/chunks_manifest.jsonl`.
 
 ## Decision Log
 
@@ -97,6 +109,18 @@ OpenAI transcription API, and merges raw output.
   Rationale: The first pipeline only needs source audio, chunks, and transcript
   artifacts. Prompt files remain explicit inputs through `--prompt-file`.
   Date/Author: 2026-06-01 / review.
+
+- Decision: Load a local `.env` from the current working directory or installed
+  project root before OpenAI calls.
+  Rationale: This keeps CLI usage simple while still making `OPENAI_API_KEY`
+  the runtime contract.
+  Date/Author: 2026-06-01 / implementation.
+
+- Decision: For the real sample smoke test, transcribe only the first
+  60-second chunk.
+  Rationale: The source file is over 3.5 hours long; a single-chunk API call
+  validates the integration without incurring a full-episode transcription.
+  Date/Author: 2026-06-01 / implementation.
 
 ## Review and Critique
 
@@ -148,9 +172,52 @@ Plan rules from current docs:
 
 ## Outcomes & Retrospective
 
-Not completed yet. At completion, summarize whether the commands run, which
-files are created, how timestamp preservation worked, and what should improve
-next.
+Completed on 2026-06-01.
+
+Implemented an installable Python 3.11 CLI package under `src/podcast_transcriber`
+with commands for `init-episode`, `chunk`, `transcribe`, and `merge`. The package
+uses `ffmpeg`/`ffprobe` for fixed-length MP3 chunking and the official OpenAI
+Python SDK for transcription.
+
+Created:
+
+    pyproject.toml
+    README.md
+    .env.example
+    src/podcast_transcriber/
+    tests/
+
+Verification completed:
+
+    PYTHONPATH=src python3 -m pytest tests
+    PYTHONPATH=src python3 -m podcast_transcriber.cli --help
+    python3 -m venv .venv
+    .venv/bin/python -m pip install -e .
+    .venv/bin/podcast-transcriber --help
+
+Synthetic chunking smoke test passed with a five-second generated sine-wave file
+and wrote three chunks plus `chunks_manifest.jsonl`.
+
+Real sample smoke test used:
+
+    EPISODE_DIR=test_transcribe
+    SOURCE_DIR=test_transcribe
+    CHUNKS_DIR=test_transcribe/chunks
+    TRANSCRIPT_DIR=test_transcribe/transcripts
+
+The real sample was chunked with `--chunk-seconds 60`, producing 215 manifest
+rows. `transcribe --limit 1 --force` called OpenAI successfully for
+`chunk_000001`, wrote one `raw_asr.jsonl` row, and `merge` wrote `raw_asr.md`.
+The merge command warned about 214 missing chunks, which is expected because
+only one chunk was transcribed for the smoke test.
+
+Timestamp preservation is manifest-driven: each raw ASR row carries `start_ms`
+and `end_ms` from its chunk, and Markdown sections render those values as
+`HH:MM:SS-HH:MM:SS`.
+
+Next improvements should be silence-aware chunking or small overlaps, richer
+integration tests with a committed short speech fixture, and optional full-file
+transcription orchestration once cost and runtime expectations are explicit.
 
 ## Directory Inputs
 
