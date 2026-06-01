@@ -21,6 +21,8 @@ Set `OPENAI_API_KEY` in your shell, or create a local `.env` file from
 
 ## Usage
 
+Default zero-overlap run:
+
 ```bash
 podcast-transcriber init-episode EPISODE_DIR \
   --source-dir SOURCE_DIR \
@@ -36,17 +38,65 @@ podcast-transcriber chunk EPISODE_DIR \
 
 podcast-transcriber transcribe EPISODE_DIR \
   --transcript-dir TRANSCRIPT_DIR \
-  --model gpt-4o-transcribe \
-  --language ja \
+  --profile-file transcription_profiles.example.yaml \
+  --profile 4o-transcribe \
   --limit 1
 
 podcast-transcriber merge EPISODE_DIR \
   --transcript-dir TRANSCRIPT_DIR
 ```
 
-The pipeline writes `chunks_manifest.jsonl`, `raw_asr.jsonl`, and `raw_asr.md`
-in the transcript directory. Chunks are encoded as mono 16 kHz MP3 at 64k and
-validated against OpenAI's 25 MB upload limit.
+Context-padded run with 20 seconds of source audio before and after each
+primary chunk where the source boundaries allow it:
+
+```bash
+podcast-transcriber init-episode EPISODE_DIR \
+  --source-dir SOURCE_DIR \
+  --chunks-dir EPISODE_DIR/chunks_180s_ctx20 \
+  --transcript-dir EPISODE_DIR/asr_gpt4o_180s_ctx20
+
+podcast-transcriber chunk EPISODE_DIR \
+  --source-dir SOURCE_DIR \
+  --source-file SOURCE_AUDIO \
+  --chunks-dir EPISODE_DIR/chunks_180s_ctx20 \
+  --transcript-dir EPISODE_DIR/asr_gpt4o_180s_ctx20 \
+  --chunk-seconds 180 \
+  --overlap-seconds 20
+
+podcast-transcriber transcribe EPISODE_DIR \
+  --transcript-dir EPISODE_DIR/asr_gpt4o_180s_ctx20 \
+  --profile-file transcription_profiles.example.yaml \
+  --profile 4o-transcribe
+
+podcast-transcriber merge EPISODE_DIR \
+  --transcript-dir EPISODE_DIR/asr_gpt4o_180s_ctx20
+```
+
+The pipeline writes `chunks_manifest.jsonl`, `transcription_run.json`,
+`raw_asr.jsonl`, and `raw_asr.md` in the transcript directory. The manifest and
+raw rows use schema version 2. `start_ms` and `end_ms` describe the primary
+source interval assigned to the chunk. `audio_start_ms` and `audio_end_ms`
+describe the larger padded audio interval sent to the model.
+
+Transcription settings come from YAML profiles. The checked-in
+`transcription_profiles.example.yaml` includes `4o-transcribe` and
+`4o-transcribe-diarize` profiles. Prompts are omitted for now. The diarization
+profile requests `diarized_json` and enables `chunking_strategy: auto` only for
+uploaded chunks longer than 30 seconds. To add a prompt later, put the prompt
+text directly in the profile's `prompt` string.
+
+Chunks are encoded as mono 16 kHz MP3 at 64k and validated against OpenAI's
+25 MB upload limit.
+
+Create multiple raw outputs by choosing separate chunk and transcript
+directories. For example, use one `asr_gpt4o_180s_ctx20` directory with
+180-second chunks for `4o-transcribe`, and another
+`asr_diarize_60s_ctx20` directory with 60-second chunks for
+`4o-transcribe-diarize`.
+
+Old generated chunks, manifests, and raw transcript rows are not migrated.
+Discard or archive those generated directories and rerun `chunk`, `transcribe`,
+and `merge` to produce schema version 2 artifacts.
 
 Use `--force` on `chunk` or `transcribe` to replace generated artifacts for the
 selected work. Source audio is never deleted.
@@ -71,10 +121,10 @@ podcast and its subject matter.
 
 ## Future Improvements
 
-- Add overlapping chunks and a reconciliation step that removes duplicate text
-  while preserving timestamps.
-- Keep raw ASR and cleaned transcripts side by side, with enough metadata to
-  trace cleaned text back to the source audio.
+- Add a later cleaning step that removes duplicate overlap text while preserving
+  the raw evidence and timestamps.
+- Keep cleaned transcripts side by side with raw ASR output, with enough
+  metadata to trace cleaned text back to the source audio.
 
 ## Knowledge-Building TODOs
 

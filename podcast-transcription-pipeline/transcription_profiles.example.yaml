@@ -1,0 +1,21 @@
+version: 1
+profiles:
+  4o-transcribe:
+    provider: openai
+    endpoint: audio.transcriptions
+    model: gpt-4o-transcribe
+    response_format: json
+    language: cn
+    prompt: "Transcribe this Chinese-language PF2e actual play podcast. Things to note while you transcribe: multiple speakers, Pathfinder 2e mechanics and lore, transliteration of terms, character names"
+    options: {}
+
+  4o-transcribe-diarize:
+    provider: openai
+    endpoint: audio.transcriptions
+    model: gpt-4o-transcribe-diarize
+    response_format: diarized_json
+    language: cn
+    options:
+      chunking_strategy:
+        value: auto
+        when_audio_seconds_gt: 30

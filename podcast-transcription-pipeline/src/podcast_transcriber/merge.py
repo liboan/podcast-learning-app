@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 import warnings
 
-from .manifest import Chunk, read_manifest
+from .manifest import REGENERATE_ARTIFACTS_MESSAGE, SCHEMA_VERSION, Chunk, read_manifest
 
 
 def merge_raw_asr_to_markdown(episode_dir: Path, transcript_dir: Path) -> str:
@@ -17,6 +17,13 @@ def merge_raw_asr_to_markdown(episode_dir: Path, transcript_dir: Path) -> str:
 
     chunks = read_manifest(manifest_path)
     rows = _read_jsonl(raw_asr_path)
+    for row in rows:
+        if row.get("schema_version") != SCHEMA_VERSION:
+            found = "missing" if row.get("schema_version") is None else row.get("schema_version")
+            raise ValueError(
+                f"raw ASR row for {row.get('chunk_id', 'unknown chunk')} has unsupported schema_version {found}; "
+                f"expected {SCHEMA_VERSION}. Please {REGENERATE_ARTIFACTS_MESSAGE}."
+            )
     manifest_by_id = {chunk.chunk_id: chunk for chunk in chunks}
 
     latest_by_chunk: dict[str, dict[str, Any]] = {}
@@ -56,18 +63,7 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _row_matches_chunk(row: dict[str, Any], chunk: Chunk) -> bool:
-    fields = [
-        "chunk_id",
-        "audio_path",
-        "source_path",
-        "source_name",
-        "source_size_bytes",
-        "source_mtime_ns",
-        "chunk_seconds",
-        "chunk_format",
-        "chunk_size_bytes",
-    ]
-    return all(row.get(field) == getattr(chunk, field) for field in fields)
+    return all(row.get(field) == value for field, value in chunk.to_dict().items())
 
 
 def _render_markdown(chunks: list[Chunk], rows: list[dict[str, Any]]) -> str:
@@ -88,6 +84,9 @@ def _render_markdown(chunks: list[Chunk], rows: list[dict[str, Any]]) -> str:
         lines.extend(
             [
                 f"## {_format_timestamp(int(row['start_ms']))}-{_format_timestamp(int(row['end_ms']))}",
+                f"Audio: {_format_timestamp(int(row['audio_start_ms']))}-{_format_timestamp(int(row['audio_end_ms']))}; "
+                f"context: leading {_format_timestamp(int(row['leading_context_ms']))}, "
+                f"trailing {_format_timestamp(int(row['trailing_context_ms']))}",
                 "",
             ]
         )
@@ -96,10 +95,21 @@ def _render_markdown(chunks: list[Chunk], rows: list[dict[str, Any]]) -> str:
             for segment in segments:
                 segment_text = _segment_text(segment).strip()
                 speaker = segment.get("speaker") if isinstance(segment, dict) else None
-                if speaker:
-                    lines.append(f"**{speaker}:** {segment_text}")
+                prefix = ""
+                if isinstance(segment, dict) and isinstance(segment.get("absolute_start_ms"), int):
+                    prefix = f"[{_format_timestamp(segment['absolute_start_ms'])}"
+                    if isinstance(segment.get("absolute_end_ms"), int):
+                        prefix += f"-{_format_timestamp(segment['absolute_end_ms'])}"
+                    prefix += "] "
+                    overlap_role = segment.get("overlap_role")
+                    if overlap_role and overlap_role != "primary":
+                        prefix += f"[{overlap_role}] "
+                if speaker and segment_text:
+                    lines.append(f"{prefix}**{speaker}:** {segment_text}")
                 elif segment_text:
-                    lines.append(segment_text)
+                    lines.append(f"{prefix}{segment_text}")
+                else:
+                    lines.append(prefix.rstrip())
                 lines.append("")
         else:
             text = str(row.get("text", "")).strip()

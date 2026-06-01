@@ -57,16 +57,25 @@ def chunk_audio(
     source_path: Path,
     chunks_dir: Path,
     chunk_seconds: int,
+    overlap_seconds: int = 0,
     force: bool = False,
 ) -> list[Chunk]:
     if chunk_seconds <= 0:
         raise RuntimeError("--chunk-seconds must be greater than zero")
+    if overlap_seconds < 0:
+        raise RuntimeError("--overlap-seconds must be zero or greater")
+    if overlap_seconds >= chunk_seconds:
+        raise RuntimeError("--overlap-seconds must be less than --chunk-seconds")
 
     ensure_ffmpeg_available()
     episode_dir = episode_dir.resolve(strict=False)
     source_dir = source_dir.resolve(strict=False)
     source_path = source_path.resolve(strict=True)
     chunks_dir = chunks_dir.resolve(strict=False)
+    try:
+        source_path.relative_to(source_dir)
+    except ValueError as exc:
+        raise RuntimeError(f"source audio must be inside source_dir: {source_path}") from exc
     chunks_dir.mkdir(parents=True, exist_ok=True)
 
     if force:
@@ -75,63 +84,56 @@ def chunk_audio(
                 old_chunk.unlink()
 
     duration_seconds = probe_duration_seconds(source_path)
-    output_pattern = chunks_dir / "chunk_%06d.mp3"
-    command = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-nostdin",
-        "-y" if force else "-n",
-        "-i",
-        str(source_path),
-        "-map",
-        "0:a:0",
-        "-vn",
-        "-ac",
-        str(CHUNK_CHANNELS),
-        "-ar",
-        str(CHUNK_SAMPLE_RATE_HZ),
-        "-codec:a",
-        CHUNK_CODEC,
-        "-b:a",
-        CHUNK_BITRATE,
-        "-f",
-        "segment",
-        "-segment_time",
-        str(chunk_seconds),
-        "-segment_start_number",
-        "1",
-        "-reset_timestamps",
-        "1",
-        str(output_pattern),
-    ]
-    result = subprocess.run(command, check=False, capture_output=True, text=True)
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip()
-        raise RuntimeError(f"ffmpeg failed while chunking {source_path}: {detail}")
-
-    chunk_files = sorted(chunks_dir.glob("chunk_*.mp3"))
-    if not chunk_files:
-        raise RuntimeError(f"ffmpeg did not create any chunks in {chunks_dir}")
-
     source_stat = source_path.stat()
     source_relative = source_path.relative_to(episode_dir).as_posix()
     chunks: list[Chunk] = []
     total_ms = int(round(duration_seconds * 1000))
+    chunk_ms = chunk_seconds * 1000
+    overlap_ms = overlap_seconds * 1000
+    expected_count = math.ceil(total_ms / chunk_ms)
 
-    for chunk_index, chunk_file in enumerate(chunk_files, start=1):
-        expected_name = f"chunk_{chunk_index:06d}.mp3"
-        if chunk_file.name != expected_name:
-            expected_path = chunks_dir / expected_name
-            if expected_path.exists():
-                raise RuntimeError(f"cannot rename {chunk_file.name}; {expected_name} already exists")
-            chunk_file.rename(expected_path)
-            chunk_file = expected_path
+    for chunk_index in range(1, expected_count + 1):
+        start_ms = min((chunk_index - 1) * chunk_ms, total_ms)
+        end_ms = min(chunk_index * chunk_ms, total_ms)
+        audio_start_ms = max(0, start_ms - overlap_ms)
+        audio_end_ms = min(total_ms, end_ms + overlap_ms)
+        audio_duration_ms = audio_end_ms - audio_start_ms
+        chunk_file = chunks_dir / f"chunk_{chunk_index:06d}.mp3"
+        if chunk_file.exists() and not force:
+            raise RuntimeError(f"{chunk_file} already exists; rerun chunk with --force")
+
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y" if force else "-n",
+            "-ss",
+            f"{audio_start_ms / 1000:.3f}",
+            "-t",
+            f"{audio_duration_ms / 1000:.3f}",
+            "-i",
+            str(source_path),
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-ac",
+            str(CHUNK_CHANNELS),
+            "-ar",
+            str(CHUNK_SAMPLE_RATE_HZ),
+            "-codec:a",
+            CHUNK_CODEC,
+            "-b:a",
+            CHUNK_BITRATE,
+            str(chunk_file),
+        ]
+        result = subprocess.run(command, check=False, capture_output=True, text=True)
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(f"ffmpeg failed while creating {chunk_file}: {detail}")
 
         validate_upload_size(chunk_file)
-        start_ms = min((chunk_index - 1) * chunk_seconds * 1000, total_ms)
-        end_ms = min(chunk_index * chunk_seconds * 1000, total_ms)
         chunks.append(
             Chunk(
                 chunk_id=f"chunk_{chunk_index:06d}",
@@ -140,6 +142,13 @@ def chunk_audio(
                 start_ms=start_ms,
                 end_ms=end_ms,
                 duration_ms=max(0, end_ms - start_ms),
+                audio_start_ms=audio_start_ms,
+                audio_end_ms=audio_end_ms,
+                audio_duration_ms=audio_duration_ms,
+                requested_overlap_ms=overlap_ms,
+                leading_context_ms=start_ms - audio_start_ms,
+                trailing_context_ms=audio_end_ms - end_ms,
+                chunk_mode="fixed_context_padding",
                 source_path=source_relative,
                 source_name=source_path.name,
                 source_size_bytes=source_stat.st_size,
@@ -154,7 +163,6 @@ def chunk_audio(
             )
         )
 
-    expected_count = math.ceil(duration_seconds / chunk_seconds)
     if len(chunks) != expected_count:
         raise RuntimeError(f"expected {expected_count} chunks, but ffmpeg created {len(chunks)}")
     return chunks

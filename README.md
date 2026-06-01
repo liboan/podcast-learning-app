@@ -2,6 +2,11 @@
 - App for language learning through podcasts. 
     - Generally will enable podcast playback + multilingual Q&A on topics in the podcast itself
 - Will consist of multiple components
-    - Offline transcription + entity-map/context generation pipeline
-    - (not designed) Agents SDK based app that can search context, listen to and re-transcribe podcast snippets to answer user queries in both languages
+    - Offline transcription pipeline into layered, chunked transcripts
+        - For example overlapping small and large chunks to trade off timestamp localization (what happpened just now) and better context
+        - Supporting multiple kinds of transcirptions while staying general, for example multiple tries, multiple models, etc.
+    - Offline knowledge generation pipeline: entity-map/context generation, external context enrichment
+        - This is probably not a coded thing but more like me telling my local Codex to do stuff
+    - (not designed) Agents SDK based app that can search context to answer user queries in both languages
+        - optional stretch: listen to and re-transcribe podcast snippets 
     - (not designed) Realtime bidiretional voice frontend

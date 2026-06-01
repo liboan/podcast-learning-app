@@ -3,26 +3,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any
-import warnings
 
 
-DIARIZE_MODEL = "gpt-4o-transcribe-diarize"
-
-
-def request_settings_for_model(model: str, duration_seconds: float | None = None) -> tuple[str, str | None]:
-    if model == DIARIZE_MODEL:
-        chunking_strategy = "auto" if duration_seconds is not None and duration_seconds > 30 else None
-        return "diarized_json", chunking_strategy
-    return "json", None
-
-
-def transcribe_audio_file(
-    audio_path: Path,
-    model: str,
-    prompt: str | None = None,
-    language: str | None = None,
-    duration_seconds: float | None = None,
-) -> dict[str, Any]:
+def transcribe_audio_file(audio_path: Path, request: dict[str, Any]) -> dict[str, Any]:
     if not os.environ.get("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY is not set. Export it in your shell or load it from a local .env file.")
 
@@ -31,31 +14,17 @@ def transcribe_audio_file(
     except ImportError as exc:
         raise RuntimeError("The OpenAI Python SDK is not installed. Run `python -m pip install -e .`.") from exc
 
-    response_format, chunking_strategy = request_settings_for_model(model, duration_seconds)
-    request: dict[str, Any] = {
-        "model": model,
-        "response_format": response_format,
-    }
-    if language:
-        request["language"] = language
-    if chunking_strategy:
-        request["chunking_strategy"] = chunking_strategy
-    if prompt and model == DIARIZE_MODEL:
-        warnings.warn("gpt-4o-transcribe-diarize does not support prompts; omitting prompt.", stacklevel=2)
-    elif prompt:
-        request["prompt"] = prompt
-
     client = OpenAI()
     with audio_path.open("rb") as audio_file:
-        response = client.audio.transcriptions.create(file=audio_file, **request)
+        response = client.audio.transcriptions.create(file=audio_file, **dict(request))
 
     raw_response = _response_to_dict(response)
     return {
         "text": _extract_text(response, raw_response),
         "segments": _extract_segments(response, raw_response),
         "raw_response": raw_response,
-        "response_format": response_format,
-        "chunking_strategy": chunking_strategy,
+        "response_format": request.get("response_format"),
+        "chunking_strategy": request.get("chunking_strategy"),
     }
 
 

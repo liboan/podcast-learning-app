@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -9,9 +8,10 @@ import sys
 from typing import Any
 
 from .audio import chunk_audio, validate_upload_size
-from .manifest import Chunk, read_manifest, write_manifest
+from .manifest import SCHEMA_VERSION, Chunk, read_manifest, write_manifest
 from .merge import merge_raw_asr_to_markdown
-from .openai_client import DIARIZE_MODEL, request_settings_for_model, transcribe_audio_file
+from .openai_client import transcribe_audio_file
+from .profiles import load_profile, request_settings_for_profile
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -37,15 +37,15 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_episode_dirs(chunk_parser)
     chunk_parser.add_argument("--source-file", required=True, type=Path)
     chunk_parser.add_argument("--chunk-seconds", type=int, default=180)
+    chunk_parser.add_argument("--overlap-seconds", type=int, default=0)
     chunk_parser.add_argument("--force", action="store_true")
     chunk_parser.set_defaults(func=_cmd_chunk)
 
     transcribe_parser = subparsers.add_parser("transcribe", help="Transcribe manifest chunks with OpenAI.")
     transcribe_parser.add_argument("episode_dir", type=Path)
     transcribe_parser.add_argument("--transcript-dir", required=True, type=Path)
-    transcribe_parser.add_argument("--model", default="gpt-4o-transcribe")
-    transcribe_parser.add_argument("--prompt-file", type=Path)
-    transcribe_parser.add_argument("--language")
+    transcribe_parser.add_argument("--profile-file", required=True, type=Path)
+    transcribe_parser.add_argument("--profile", required=True)
     transcribe_parser.add_argument("--chunk-id")
     transcribe_parser.add_argument("--start-index", type=int)
     transcribe_parser.add_argument("--end-index", type=int)
@@ -88,6 +88,13 @@ def _cmd_init_episode(args: argparse.Namespace) -> int:
 
 def _cmd_chunk(args: argparse.Namespace) -> int:
     episode_dir, source_dir, chunks_dir, transcript_dir = _validate_episode_dirs(args)
+    if args.chunk_seconds <= 0:
+        raise RuntimeError("--chunk-seconds must be greater than zero")
+    if args.overlap_seconds < 0:
+        raise RuntimeError("--overlap-seconds must be zero or greater")
+    if args.overlap_seconds >= args.chunk_seconds:
+        raise RuntimeError("--overlap-seconds must be less than --chunk-seconds")
+
     source_file = _resolve(args.source_file)
     if not source_file.exists():
         raise FileNotFoundError(f"source audio not found: {source_file}")
@@ -98,14 +105,25 @@ def _cmd_chunk(args: argparse.Namespace) -> int:
     transcript_dir.mkdir(parents=True, exist_ok=True)
     chunks_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = transcript_dir / "chunks_manifest.jsonl"
+    run_metadata_path = transcript_dir / "transcription_run.json"
+    existing_metadata = _read_json_file_if_exists(run_metadata_path)
 
-    if manifest_path.exists() and not args.force:
+    if manifest_path.exists():
         chunks = read_manifest(manifest_path)
-        if _manifest_matches_source(chunks, episode_dir, source_file, args.chunk_seconds):
+        if _manifest_matches_source(chunks, episode_dir, source_file, args.chunk_seconds, args.overlap_seconds) and not args.force:
+            if existing_metadata and not _run_metadata_matches_chunks(existing_metadata, episode_dir, transcript_dir, chunks):
+                raise RuntimeError("existing transcription_run.json does not match the manifest; rerun chunk with --force")
             _validate_manifest_chunk_files(episode_dir, chunks)
+            metadata = _run_metadata_for_chunks(episode_dir, transcript_dir, chunks)
+            if existing_metadata and existing_metadata.get("transcription"):
+                metadata["transcription"] = existing_metadata["transcription"]
+            _write_json_file_atomic(run_metadata_path, metadata)
             print(f"manifest already up to date: {manifest_path}")
             return 0
-        raise RuntimeError("existing manifest does not match the source file or chunk settings; rerun chunk with --force")
+        if not args.force:
+            raise RuntimeError("existing manifest does not match the source file or chunk settings; rerun chunk with --force")
+    elif existing_metadata and not args.force:
+        raise RuntimeError("existing transcription_run.json found without a manifest; rerun chunk with --force")
 
     existing_chunks = sorted(chunks_dir.glob("chunk_*.mp3"))
     if existing_chunks and not args.force:
@@ -117,9 +135,11 @@ def _cmd_chunk(args: argparse.Namespace) -> int:
         source_path=source_file,
         chunks_dir=chunks_dir,
         chunk_seconds=args.chunk_seconds,
+        overlap_seconds=args.overlap_seconds,
         force=args.force,
     )
     write_manifest(chunks, manifest_path)
+    _write_json_file_atomic(run_metadata_path, _run_metadata_for_chunks(episode_dir, transcript_dir, chunks))
     print(f"wrote {len(chunks)} chunks and manifest: {manifest_path}")
     return 0
 
@@ -133,11 +153,34 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
     if not selected_chunks:
         raise RuntimeError("no chunks matched the requested selection")
 
-    prompt, prompt_sha256 = _read_prompt(args.prompt_file)
-    effective_prompt = None if args.model == DIARIZE_MODEL else prompt
-    effective_prompt_sha256 = None if args.model == DIARIZE_MODEL else prompt_sha256
+    profile_path = _resolve(args.profile_file)
+    profile = load_profile(profile_path, args.profile)
+    cwd = Path.cwd().resolve(strict=False)
+    try:
+        profile_file = Path(profile.profile_file).relative_to(cwd).as_posix()
+    except ValueError:
+        profile_file = profile.profile_file
     raw_asr_path = transcript_dir / "raw_asr.jsonl"
+    run_metadata_path = transcript_dir / "transcription_run.json"
     existing_rows = _read_jsonl_if_exists(raw_asr_path)
+    run_request = request_settings_for_profile(profile, max(chunk.audio_duration_ms for chunk in selected_chunks) / 1000)
+    transcription_metadata = {
+        "profile_name": profile.name,
+        "profile_sha256": profile.profile_sha256,
+        "profile_file": profile_file,
+        "model": run_request["model"],
+        "language": run_request.get("language"),
+        "prompt_sha256": profile.prompt_sha256,
+        "response_format": run_request["response_format"],
+        "chunking_strategy": run_request.get("chunking_strategy"),
+    }
+    existing_metadata = _read_json_file_if_exists(run_metadata_path)
+    if existing_metadata and not args.force:
+        if not _run_metadata_matches_chunks(existing_metadata, episode_dir, transcript_dir, chunks):
+            raise RuntimeError("existing transcription_run.json does not match the manifest; rerun transcribe with --force")
+        previous_transcription = existing_metadata.get("transcription")
+        if previous_transcription and previous_transcription != transcription_metadata:
+            raise RuntimeError("existing transcription_run.json has different transcription settings; rerun transcribe with --force")
 
     if args.force:
         selected_ids = {chunk.chunk_id for chunk in selected_chunks}
@@ -152,16 +195,19 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
             raise FileNotFoundError(f"chunk audio not found: {audio_path}")
         validate_upload_size(audio_path)
 
-        duration_seconds = chunk.duration_ms / 1000 if chunk.duration_ms else None
-        response_format, chunking_strategy = request_settings_for_model(args.model, duration_seconds)
+        duration_seconds = chunk.audio_duration_ms / 1000 if chunk.audio_duration_ms else None
+        request = request_settings_for_profile(profile, duration_seconds)
         if _has_matching_row(
             existing_rows,
             chunk,
-            model=args.model,
-            language=args.language,
-            prompt_sha256=effective_prompt_sha256,
-            response_format=response_format,
-            chunking_strategy=chunking_strategy,
+            profile_name=profile.name,
+            profile_sha256=profile.profile_sha256,
+            profile_file=profile_file,
+            model=request["model"],
+            language=request.get("language"),
+            prompt_sha256=profile.prompt_sha256,
+            response_format=request["response_format"],
+            chunking_strategy=request.get("chunking_strategy"),
         ):
             skipped += 1
             print(f"skipped existing transcript: {chunk.chunk_id}")
@@ -169,20 +215,20 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
 
         result = transcribe_audio_file(
             audio_path=audio_path,
-            model=args.model,
-            prompt=effective_prompt,
-            language=args.language,
-            duration_seconds=duration_seconds,
+            request=request,
         )
         row = {
             **chunk.to_dict(),
-            "model": args.model,
-            "language": args.language,
-            "prompt_sha256": effective_prompt_sha256,
+            "profile_name": profile.name,
+            "profile_sha256": profile.profile_sha256,
+            "profile_file": profile_file,
+            "model": request["model"],
+            "language": request.get("language"),
+            "prompt_sha256": profile.prompt_sha256,
             "response_format": result["response_format"],
             "chunking_strategy": result["chunking_strategy"],
             "text": result["text"],
-            "segments": result["segments"],
+            "segments": enrich_segments_with_absolute_times(result["segments"], chunk),
             "raw_response": result["raw_response"],
         }
         _append_jsonl(raw_asr_path, row)
@@ -191,6 +237,9 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
         print(f"transcribed: {chunk.chunk_id}")
 
     print(f"transcription complete: {completed} written, {skipped} skipped")
+    run_metadata = _run_metadata_for_chunks(episode_dir, transcript_dir, chunks)
+    run_metadata["transcription"] = transcription_metadata
+    _write_json_file_atomic(run_metadata_path, run_metadata)
     return 0
 
 
@@ -229,17 +278,26 @@ def _require_inside(parent: Path, child: Path, label: str) -> None:
         raise RuntimeError(f"{label} must be inside {parent}: {child}") from exc
 
 
-def _manifest_matches_source(chunks: list[Chunk], episode_dir: Path, source_file: Path, chunk_seconds: int) -> bool:
+def _manifest_matches_source(
+    chunks: list[Chunk],
+    episode_dir: Path,
+    source_file: Path,
+    chunk_seconds: int,
+    overlap_seconds: int,
+) -> bool:
     if not chunks:
         return False
     source_stat = source_file.stat()
     source_relative = source_file.relative_to(episode_dir).as_posix()
+    requested_overlap_ms = overlap_seconds * 1000
     for chunk in chunks:
         if chunk.source_path != source_relative:
             return False
         if chunk.source_size_bytes != source_stat.st_size or chunk.source_mtime_ns != source_stat.st_mtime_ns:
             return False
         if chunk.chunk_seconds != chunk_seconds:
+            return False
+        if chunk.requested_overlap_ms != requested_overlap_ms:
             return False
     return True
 
@@ -252,6 +310,56 @@ def _validate_manifest_chunk_files(episode_dir: Path, chunks: list[Chunk]) -> No
         if chunk_path.stat().st_size != chunk.chunk_size_bytes:
             raise RuntimeError(f"manifest references stale chunk size: {chunk_path}")
         validate_upload_size(chunk_path)
+
+
+def _run_metadata_for_chunks(episode_dir: Path, transcript_dir: Path, chunks: list[Chunk]) -> dict[str, Any]:
+    if not chunks:
+        raise RuntimeError("cannot write transcription_run.json without manifest chunks")
+    first = chunks[0]
+    chunk_dir = Path(first.audio_path).parent.as_posix()
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "source": {
+            "path": first.source_path,
+            "name": first.source_name,
+            "size_bytes": first.source_size_bytes,
+            "mtime_ns": first.source_mtime_ns,
+        },
+        "chunk": {
+            "chunks_dir": chunk_dir,
+            "chunk_count": len(chunks),
+            "chunk_seconds": first.chunk_seconds,
+            "overlap_seconds": first.requested_overlap_ms // 1000,
+            "requested_overlap_ms": first.requested_overlap_ms,
+            "chunk_mode": first.chunk_mode,
+            "format": first.chunk_format,
+            "codec": first.chunk_codec,
+            "sample_rate_hz": first.chunk_sample_rate_hz,
+            "channels": first.chunk_channels,
+            "bitrate": first.chunk_bitrate,
+        },
+        "artifacts": {
+            "transcript_dir": transcript_dir.relative_to(episode_dir).as_posix(),
+            "chunks_manifest_path": (transcript_dir / "chunks_manifest.jsonl").relative_to(episode_dir).as_posix(),
+            "raw_asr_path": (transcript_dir / "raw_asr.jsonl").relative_to(episode_dir).as_posix(),
+            "markdown_path": (transcript_dir / "raw_asr.md").relative_to(episode_dir).as_posix(),
+        },
+    }
+
+
+def _run_metadata_matches_chunks(
+    metadata: dict[str, Any],
+    episode_dir: Path,
+    transcript_dir: Path,
+    chunks: list[Chunk],
+) -> bool:
+    expected = _run_metadata_for_chunks(episode_dir, transcript_dir, chunks)
+    return (
+        metadata.get("schema_version") == SCHEMA_VERSION
+        and metadata.get("source") == expected["source"]
+        and metadata.get("chunk") == expected["chunk"]
+        and metadata.get("artifacts") == expected["artifacts"]
+    )
 
 
 def _select_chunks(chunks: list[Chunk], args: argparse.Namespace) -> list[Chunk]:
@@ -267,18 +375,6 @@ def _select_chunks(chunks: list[Chunk], args: argparse.Namespace) -> list[Chunk]
             raise RuntimeError("--limit must be greater than zero")
         selected = selected[: args.limit]
     return selected
-
-
-def _read_prompt(prompt_file: Path | None) -> tuple[str | None, str | None]:
-    if prompt_file is None:
-        return None, None
-    prompt_path = _resolve(prompt_file)
-    prompt_bytes = prompt_path.read_bytes()
-    try:
-        prompt = prompt_bytes.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise RuntimeError(f"prompt file must be UTF-8: {prompt_path}") from exc
-    return prompt, hashlib.sha256(prompt_bytes).hexdigest()
 
 
 def _read_jsonl_if_exists(path: Path) -> list[dict[str, Any]]:
@@ -298,6 +394,25 @@ def _read_jsonl_if_exists(path: Path) -> list[dict[str, Any]]:
                 raise ValueError(f"invalid JSONL row {line_number} in {path}: expected an object")
             rows.append(payload)
     return rows
+
+
+def _read_json_file_if_exists(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON in {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"invalid JSON in {path}: expected an object")
+    return payload
+
+
+def _write_json_file_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp_path.replace(path)
 
 
 def _write_jsonl_atomic(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -321,6 +436,9 @@ def _has_matching_row(
     rows: list[dict[str, Any]],
     chunk: Chunk,
     *,
+    profile_name: str,
+    profile_sha256: str,
+    profile_file: str,
     model: str,
     language: str | None,
     prompt_sha256: str | None,
@@ -328,19 +446,13 @@ def _has_matching_row(
     chunking_strategy: str | None,
 ) -> bool:
     for row in rows:
-        if row.get("chunk_id") != chunk.chunk_id:
+        if any(row.get(field) != value for field, value in chunk.to_dict().items()):
             continue
-        if row.get("source_path") != chunk.source_path:
+        if row.get("profile_name") != profile_name:
             continue
-        if row.get("source_size_bytes") != chunk.source_size_bytes:
+        if row.get("profile_sha256") != profile_sha256:
             continue
-        if row.get("source_mtime_ns") != chunk.source_mtime_ns:
-            continue
-        if row.get("chunk_seconds") != chunk.chunk_seconds:
-            continue
-        if row.get("chunk_format") != chunk.chunk_format:
-            continue
-        if row.get("chunk_size_bytes") != chunk.chunk_size_bytes:
+        if row.get("profile_file") != profile_file:
             continue
         if row.get("model") != model:
             continue
@@ -354,6 +466,50 @@ def _has_matching_row(
             continue
         return True
     return False
+
+
+def enrich_segments_with_absolute_times(segments: list[dict[str, Any]] | None, chunk: Chunk) -> list[dict[str, Any]] | None:
+    if segments is None:
+        return None
+    enriched: list[dict[str, Any]] = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            enriched.append({"value": str(segment)})
+            continue
+
+        enriched_segment = dict(segment)
+        start = segment.get("start")
+        end = segment.get("end")
+        if (
+            isinstance(start, (int, float))
+            and not isinstance(start, bool)
+            and isinstance(end, (int, float))
+            and not isinstance(end, bool)
+            and end >= start
+        ):
+            relative_start_ms = int(round(start * 1000))
+            relative_end_ms = int(round(end * 1000))
+            absolute_start_ms = chunk.audio_start_ms + relative_start_ms
+            absolute_end_ms = chunk.audio_start_ms + relative_end_ms
+            if absolute_end_ms <= chunk.start_ms:
+                overlap_role = "leading_context"
+            elif absolute_start_ms >= chunk.end_ms:
+                overlap_role = "trailing_context"
+            elif absolute_start_ms < chunk.start_ms or absolute_end_ms > chunk.end_ms:
+                overlap_role = "crosses_primary_boundary"
+            else:
+                overlap_role = "primary"
+            enriched_segment.update(
+                {
+                    "relative_start_ms": relative_start_ms,
+                    "relative_end_ms": relative_end_ms,
+                    "absolute_start_ms": absolute_start_ms,
+                    "absolute_end_ms": absolute_end_ms,
+                    "overlap_role": overlap_role,
+                }
+            )
+        enriched.append(enriched_segment)
+    return enriched
 
 
 def _load_local_env() -> None:

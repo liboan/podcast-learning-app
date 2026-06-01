@@ -6,6 +6,12 @@ from pathlib import Path
 from typing import Any
 
 
+SCHEMA_VERSION = 2
+REGENERATE_ARTIFACTS_MESSAGE = (
+    "discard or archive generated chunk/transcript artifacts and regenerate them with the current pipeline"
+)
+
+
 @dataclass(frozen=True)
 class Chunk:
     chunk_id: str
@@ -14,6 +20,13 @@ class Chunk:
     start_ms: int
     end_ms: int
     duration_ms: int
+    audio_start_ms: int
+    audio_end_ms: int
+    audio_duration_ms: int
+    requested_overlap_ms: int
+    leading_context_ms: int
+    trailing_context_ms: int
+    chunk_mode: str
     source_path: str
     source_name: str
     source_size_bytes: int
@@ -25,6 +38,7 @@ class Chunk:
     chunk_channels: int
     chunk_bitrate: str
     chunk_size_bytes: int
+    schema_version: int = SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -32,9 +46,19 @@ class Chunk:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Chunk":
         known_fields = {field.name for field in fields(cls)}
+        schema_version = data.get("schema_version")
+        if schema_version != SCHEMA_VERSION:
+            found = "missing" if schema_version is None else schema_version
+            raise ValueError(
+                f"unsupported manifest schema_version {found}; expected {SCHEMA_VERSION}. "
+                f"Please {REGENERATE_ARTIFACTS_MESSAGE}."
+            )
         missing = sorted(known_fields - data.keys())
         if missing:
-            raise ValueError(f"manifest row missing required fields: {', '.join(missing)}")
+            raise ValueError(
+                f"manifest row missing required fields: {', '.join(missing)}. "
+                f"Please {REGENERATE_ARTIFACTS_MESSAGE}."
+            )
         return cls(**{key: data[key] for key in known_fields})
 
 

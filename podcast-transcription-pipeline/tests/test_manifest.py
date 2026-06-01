@@ -1,30 +1,29 @@
 from pathlib import Path
 
-from podcast_transcriber.manifest import Chunk, read_manifest, write_manifest
+import pytest
+
+from podcast_transcriber.manifest import read_manifest, write_manifest
+
+from tests.helpers import sample_chunk
 
 
 def test_manifest_round_trip(tmp_path: Path) -> None:
-    chunk = Chunk(
-        chunk_id="chunk_000001",
-        chunk_index=1,
-        audio_path="chunks/chunk_000001.mp3",
-        start_ms=0,
-        end_ms=1000,
-        duration_ms=1000,
-        source_path="audio/sample.wav",
-        source_name="sample.wav",
-        source_size_bytes=123,
-        source_mtime_ns=456,
-        chunk_seconds=1,
-        chunk_format="mp3",
-        chunk_codec="libmp3lame",
-        chunk_sample_rate_hz=16000,
-        chunk_channels=1,
-        chunk_bitrate="64k",
-        chunk_size_bytes=789,
-    )
+    chunk = sample_chunk()
 
     manifest_path = tmp_path / "chunks_manifest.jsonl"
     write_manifest([chunk], manifest_path)
 
     assert read_manifest(manifest_path) == [chunk]
+    row = read_manifest(manifest_path)[0].to_dict()
+    assert row["schema_version"] == 2
+    assert row["audio_start_ms"] == 0
+    assert row["audio_end_ms"] == 1500
+    assert row["trailing_context_ms"] == 500
+
+
+def test_old_manifest_row_explains_regeneration(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "chunks_manifest.jsonl"
+    manifest_path.write_text('{"chunk_id": "chunk_000001"}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="regenerate"):
+        read_manifest(manifest_path)
