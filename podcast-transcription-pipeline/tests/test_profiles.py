@@ -13,15 +13,11 @@ def test_example_profiles_resolve_model_settings_and_diarization_options() -> No
     assert regular_request["model"] == "gpt-4o-transcribe"
     assert regular_request["language"] == regular.language
     assert regular_request["response_format"] == "json"
-    assert "prompt" not in regular_request
-    assert regular.prompt_sha256 is None
     assert profile_fingerprint(profile_file, "4o-transcribe") == regular.profile_sha256
 
     short_request = request_settings_for_profile(diarize, 30)
     long_request = request_settings_for_profile(diarize, 30.1)
     assert short_request["response_format"] == "diarized_json"
-    assert "prompt" not in short_request
-    assert "chunking_strategy" not in short_request
     assert long_request["chunking_strategy"] == "auto"
 
 

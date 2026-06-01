@@ -14,15 +14,17 @@ The user explicitly chooses an episode directory, source audio file, and all
 working/output directories:
 
     podcast-transcriber init-episode EPISODE_DIR --source-dir SOURCE_DIR --chunks-dir CHUNKS_DIR --transcript-dir TRANSCRIPT_DIR
-    podcast-transcriber chunk EPISODE_DIR --source-dir SOURCE_DIR --source-file SOURCE_AUDIO --chunks-dir CHUNKS_DIR --transcript-dir TRANSCRIPT_DIR
-    podcast-transcriber transcribe EPISODE_DIR --transcript-dir TRANSCRIPT_DIR
-    podcast-transcriber merge EPISODE_DIR --transcript-dir TRANSCRIPT_DIR
+    podcast-transcriber chunk EPISODE_DIR --source-dir SOURCE_DIR --source-file SOURCE_AUDIO --chunks-dir CHUNKS_DIR
+    podcast-transcriber transcribe EPISODE_DIR --chunks-dir CHUNKS_DIR --transcript-dir TRANSCRIPT_DIR
+    podcast-transcriber merge EPISODE_DIR --chunks-dir CHUNKS_DIR --transcript-dir TRANSCRIPT_DIR
 
 The pipeline writes:
 
-    TRANSCRIPT_DIR/chunks_manifest.jsonl
-    TRANSCRIPT_DIR/raw_asr.jsonl
-    TRANSCRIPT_DIR/raw_asr.md
+    CHUNKS_DIR/chunking_manifest.jsonl
+    CHUNKS_DIR/chunking_metadata.json
+    TRANSCRIPT_DIR/transcription_raw_asr.jsonl
+    TRANSCRIPT_DIR/transcription_metadata.json
+    TRANSCRIPT_DIR/transcription_raw_asr.md
 
 `EPISODE_DIR` can be any writable directory. `SOURCE_AUDIO` must be a local
 audio file under `SOURCE_DIR`. Do not depend on a specific episode name,
@@ -64,7 +66,7 @@ OpenAI transcription API, and merges raw output.
 - Observation: One-minute chunking on the real sample produced 215 upload-sized
   MP3 chunks.
   Evidence: `podcast-transcriber chunk ... --chunk-seconds 60` wrote 215 rows
-  to `test_transcribe/transcripts/chunks_manifest.jsonl`.
+  to `test_transcribe/chunks/chunking_manifest.jsonl`.
 
 ## Decision Log
 
@@ -196,7 +198,7 @@ Verification completed:
     .venv/bin/podcast-transcriber --help
 
 Synthetic chunking smoke test passed with a five-second generated sine-wave file
-and wrote three chunks plus `chunks_manifest.jsonl`.
+and wrote three chunks plus `chunking_manifest.jsonl`.
 
 Real sample smoke test used:
 
@@ -207,7 +209,7 @@ Real sample smoke test used:
 
 The real sample was chunked with `--chunk-seconds 60`, producing 215 manifest
 rows. `transcribe --limit 1 --force` called OpenAI successfully for
-`chunk_000001`, wrote one `raw_asr.jsonl` row, and `merge` wrote `raw_asr.md`.
+`chunk_000001`, wrote one `transcription_raw_asr.jsonl` row, and `merge` wrote `transcription_raw_asr.md`.
 The merge command warned about 214 missing chunks, which is expected because
 only one chunk was transcribed for the smoke test.
 
@@ -277,9 +279,9 @@ outputs unless the project intentionally commits sample artifacts.
 Implement:
 
     podcast-transcriber init-episode EPISODE_DIR --source-dir SOURCE_DIR --chunks-dir CHUNKS_DIR --transcript-dir TRANSCRIPT_DIR
-    podcast-transcriber chunk EPISODE_DIR --source-dir SOURCE_DIR --source-file SOURCE_AUDIO --chunks-dir CHUNKS_DIR --transcript-dir TRANSCRIPT_DIR [--chunk-seconds N] [--force]
-    podcast-transcriber transcribe EPISODE_DIR --transcript-dir TRANSCRIPT_DIR [--model MODEL] [--prompt-file PATH] [--language LANGUAGE] [--chunk-id CHUNK_ID] [--start-index N] [--end-index N] [--limit N] [--force]
-    podcast-transcriber merge EPISODE_DIR --transcript-dir TRANSCRIPT_DIR
+    podcast-transcriber chunk EPISODE_DIR --source-dir SOURCE_DIR --source-file SOURCE_AUDIO --chunks-dir CHUNKS_DIR [--chunk-seconds N] [--force]
+    podcast-transcriber transcribe EPISODE_DIR --chunks-dir CHUNKS_DIR --transcript-dir TRANSCRIPT_DIR [--model MODEL] [--prompt-file PATH] [--language LANGUAGE] [--chunk-id CHUNK_ID] [--start-index N] [--end-index N] [--limit N] [--force]
+    podcast-transcriber merge EPISODE_DIR --chunks-dir CHUNKS_DIR --transcript-dir TRANSCRIPT_DIR
 
 Directory arguments are required. `--source-file` is required and must point
 inside `SOURCE_DIR`. The `chunk` command must validate that relationship. Do not
@@ -287,8 +289,8 @@ search for source files, chunks, or transcripts in conventional folder names.
 
 `init-episode` creates missing folders but never overwrites existing files.
 
-`chunk` writes MP3 files to the configured chunks directory and writes
-`chunks_manifest.jsonl` to the configured transcript directory.
+`chunk` writes MP3 files, `chunking_manifest.jsonl`, and
+`chunking_metadata.json` to the configured chunks directory.
 
 Generated chunks must use a stable ffmpeg target:
 
@@ -328,12 +330,12 @@ Store paths relative to `EPISODE_DIR`.
 
 `transcribe` reads the manifest, selects chunks, calls the OpenAI wrapper for
 each selected chunk, and appends one JSON object per completed chunk to
-`raw_asr.jsonl` in the configured transcript directory. It must support
+`transcription_raw_asr.jsonl` in the configured transcript directory. It must support
 single-chunk and subset runs for testing:
 
-    podcast-transcriber transcribe EPISODE_DIR --transcript-dir TRANSCRIPT_DIR --chunk-id chunk_000001
-    podcast-transcriber transcribe EPISODE_DIR --transcript-dir TRANSCRIPT_DIR --start-index 10 --end-index 20
-    podcast-transcriber transcribe EPISODE_DIR --transcript-dir TRANSCRIPT_DIR --limit 1
+    podcast-transcriber transcribe EPISODE_DIR --chunks-dir CHUNKS_DIR --transcript-dir TRANSCRIPT_DIR --chunk-id chunk_000001
+    podcast-transcriber transcribe EPISODE_DIR --chunks-dir CHUNKS_DIR --transcript-dir TRANSCRIPT_DIR --start-index 10 --end-index 20
+    podcast-transcriber transcribe EPISODE_DIR --chunks-dir CHUNKS_DIR --transcript-dir TRANSCRIPT_DIR --limit 1
 
 Before each API call, `transcribe` must verify that the chunk file exists and is
 below 25 MB.
@@ -451,7 +453,7 @@ Rules for the wrapper:
 
 `merge.py`:
 
-    def merge_raw_asr_to_markdown(episode_dir: Path, transcript_dir: Path) -> str: ...
+    def merge_raw_asr_to_markdown(episode_dir: Path, chunks_dir: Path, transcript_dir: Path) -> str: ...
 
 ## Validation
 
@@ -467,10 +469,10 @@ Run a chunking smoke test:
     SOURCE_DIR="$EPISODE_DIR/input-audio"
     CHUNKS_DIR="$EPISODE_DIR/chunk-output"
     TRANSCRIPT_DIR="$EPISODE_DIR/asr-output"
-    podcast-transcriber init-episode "$EPISODE_DIR" --source-dir "$SOURCE_DIR" --chunks-dir "$CHUNKS_DIR" --transcript-dir "$TRANSCRIPT_DIR"
+    podcast-transcriber init-episode "$EPISODE_DIR" --source-dir "$SOURCE_DIR" --chunks-dir "$CHUNKS_DIR"
     ffmpeg -f lavfi -i sine=frequency=1000:duration=5 -ar 16000 -ac 1 "$SOURCE_DIR/synthetic.wav"
-    podcast-transcriber chunk "$EPISODE_DIR" --source-dir "$SOURCE_DIR" --source-file "$SOURCE_DIR/synthetic.wav" --chunks-dir "$CHUNKS_DIR" --transcript-dir "$TRANSCRIPT_DIR" --chunk-seconds 2
-    test -s "$TRANSCRIPT_DIR/chunks_manifest.jsonl"
+    podcast-transcriber chunk "$EPISODE_DIR" --source-dir "$SOURCE_DIR" --source-file "$SOURCE_DIR/synthetic.wav" --chunks-dir "$CHUNKS_DIR" --chunk-seconds 2
+    test -s "$CHUNKS_DIR/chunking_manifest.jsonl"
 
 Expected result: all commands exit 0 and the manifest exists.
 
@@ -483,12 +485,12 @@ available:
     CHUNKS_DIR=<chunks-directory>
     TRANSCRIPT_DIR=<transcript-directory>
     podcast-transcriber init-episode "$EPISODE_DIR" --source-dir "$SOURCE_DIR" --chunks-dir "$CHUNKS_DIR" --transcript-dir "$TRANSCRIPT_DIR"
-    podcast-transcriber chunk "$EPISODE_DIR" --source-dir "$SOURCE_DIR" --source-file "$SOURCE_AUDIO" --chunks-dir "$CHUNKS_DIR" --transcript-dir "$TRANSCRIPT_DIR" --chunk-seconds 60
-    podcast-transcriber transcribe "$EPISODE_DIR" --transcript-dir "$TRANSCRIPT_DIR" --model gpt-4o-transcribe --language LANGUAGE --limit 1
-    podcast-transcriber transcribe "$EPISODE_DIR" --transcript-dir "$TRANSCRIPT_DIR" --model gpt-4o-transcribe --language LANGUAGE
-    podcast-transcriber merge "$EPISODE_DIR" --transcript-dir "$TRANSCRIPT_DIR"
-    test -s "$TRANSCRIPT_DIR/raw_asr.jsonl"
-    test -s "$TRANSCRIPT_DIR/raw_asr.md"
+    podcast-transcriber chunk "$EPISODE_DIR" --source-dir "$SOURCE_DIR" --source-file "$SOURCE_AUDIO" --chunks-dir "$CHUNKS_DIR" --chunk-seconds 60
+    podcast-transcriber transcribe "$EPISODE_DIR" --chunks-dir "$CHUNKS_DIR" --transcript-dir "$TRANSCRIPT_DIR" --model gpt-4o-transcribe --language LANGUAGE --limit 1
+    podcast-transcriber transcribe "$EPISODE_DIR" --chunks-dir "$CHUNKS_DIR" --transcript-dir "$TRANSCRIPT_DIR" --model gpt-4o-transcribe --language LANGUAGE
+    podcast-transcriber merge "$EPISODE_DIR" --chunks-dir "$CHUNKS_DIR" --transcript-dir "$TRANSCRIPT_DIR"
+    test -s "$TRANSCRIPT_DIR/transcription_raw_asr.jsonl"
+    test -s "$TRANSCRIPT_DIR/transcription_raw_asr.md"
 
 Replace `LANGUAGE` with a supported language code, preferring ISO-639-1 where
 available, or omit `--language` when unknown.
@@ -519,7 +521,7 @@ or chunk settings differ, fail clearly unless `--force` is passed.
 `transcribe` resumes from the first missing matching chunk. If a network or API
 error stops the run, rerunning the same command continues safely.
 
-`merge` is safe to rerun and regenerates `raw_asr.md`.
+`merge` is safe to rerun and regenerates `transcription_raw_asr.md`.
 
 If `ffmpeg` or `ffprobe` is missing:
 

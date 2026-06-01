@@ -9,7 +9,9 @@ from podcast_transcriber.merge import merge_raw_asr_to_markdown
 
 def test_merge_renders_context_timing_and_segments(tmp_path: Path) -> None:
     episode_dir = tmp_path
+    chunks_dir = episode_dir / "chunks"
     transcript_dir = episode_dir / "transcripts"
+    chunks_dir.mkdir()
     transcript_dir.mkdir()
     chunk = sample_chunk(
         start_ms=5000,
@@ -23,7 +25,7 @@ def test_merge_renders_context_timing_and_segments(tmp_path: Path) -> None:
         trailing_context_ms=2000,
         chunk_seconds=2,
     )
-    write_manifest([chunk], transcript_dir / "chunks_manifest.jsonl")
+    write_manifest([chunk], chunks_dir / "chunking_manifest.jsonl")
     row = {
         **chunk.to_dict(),
         "model": "gpt-4o-transcribe",
@@ -57,13 +59,13 @@ def test_merge_renders_context_timing_and_segments(tmp_path: Path) -> None:
         ],
         "raw_response": {"text": "hello world"},
     }
-    (transcript_dir / "raw_asr.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    (transcript_dir / "transcription_raw_asr.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
 
-    markdown = merge_raw_asr_to_markdown(episode_dir, transcript_dir)
+    markdown = merge_raw_asr_to_markdown(episode_dir, chunks_dir, transcript_dir)
 
     assert "## 00:00:05-00:00:07" in markdown
     assert "Audio: 00:00:03-00:00:09; context: leading 00:00:02, trailing 00:00:02" in markdown
     assert "[00:00:04-00:00:05] [leading_context] **S1:** leading" in markdown
     assert "[00:00:05-00:00:06] **S1:** primary" in markdown
     assert "[00:00:07-00:00:08] [trailing_context] **S2:** trailing" in markdown
-    assert (transcript_dir / "raw_asr.md").exists()
+    assert (transcript_dir / "transcription_raw_asr.md").exists()

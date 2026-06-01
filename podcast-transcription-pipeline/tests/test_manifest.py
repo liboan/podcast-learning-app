@@ -10,7 +10,7 @@ from tests.helpers import sample_chunk
 def test_manifest_round_trip(tmp_path: Path) -> None:
     chunk = sample_chunk()
 
-    manifest_path = tmp_path / "chunks_manifest.jsonl"
+    manifest_path = tmp_path / "chunking_manifest.jsonl"
     write_manifest([chunk], manifest_path)
 
     assert read_manifest(manifest_path) == [chunk]
@@ -22,7 +22,7 @@ def test_manifest_round_trip(tmp_path: Path) -> None:
 
 
 def test_old_manifest_row_explains_regeneration(tmp_path: Path) -> None:
-    manifest_path = tmp_path / "chunks_manifest.jsonl"
+    manifest_path = tmp_path / "chunking_manifest.jsonl"
     manifest_path.write_text('{"chunk_id": "chunk_000001"}\n', encoding="utf-8")
 
     with pytest.raises(ValueError, match="regenerate"):

@@ -7,13 +7,18 @@ import warnings
 
 from .manifest import REGENERATE_ARTIFACTS_MESSAGE, SCHEMA_VERSION, Chunk, read_manifest
 
+CHUNKING_MANIFEST_FILENAME = "chunking_manifest.jsonl"
+TRANSCRIPTION_RAW_ASR_FILENAME = "transcription_raw_asr.jsonl"
+TRANSCRIPTION_MARKDOWN_FILENAME = "transcription_raw_asr.md"
 
-def merge_raw_asr_to_markdown(episode_dir: Path, transcript_dir: Path) -> str:
+
+def merge_raw_asr_to_markdown(episode_dir: Path, chunks_dir: Path, transcript_dir: Path) -> str:
     episode_dir = episode_dir.resolve(strict=False)
+    chunks_dir = chunks_dir.resolve(strict=False)
     transcript_dir = transcript_dir.resolve(strict=False)
-    manifest_path = transcript_dir / "chunks_manifest.jsonl"
-    raw_asr_path = transcript_dir / "raw_asr.jsonl"
-    markdown_path = transcript_dir / "raw_asr.md"
+    manifest_path = chunks_dir / CHUNKING_MANIFEST_FILENAME
+    raw_asr_path = transcript_dir / TRANSCRIPTION_RAW_ASR_FILENAME
+    markdown_path = transcript_dir / TRANSCRIPTION_MARKDOWN_FILENAME
 
     chunks = read_manifest(manifest_path)
     rows = _read_jsonl(raw_asr_path)

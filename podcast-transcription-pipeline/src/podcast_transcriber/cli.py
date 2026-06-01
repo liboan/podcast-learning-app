@@ -9,9 +9,17 @@ from typing import Any
 
 from .audio import chunk_audio, validate_upload_size
 from .manifest import SCHEMA_VERSION, Chunk, read_manifest, write_manifest
-from .merge import merge_raw_asr_to_markdown
+from .merge import (
+    CHUNKING_MANIFEST_FILENAME,
+    TRANSCRIPTION_MARKDOWN_FILENAME,
+    TRANSCRIPTION_RAW_ASR_FILENAME,
+    merge_raw_asr_to_markdown,
+)
 from .openai_client import transcribe_audio_file
 from .profiles import load_profile, request_settings_for_profile
+
+CHUNKING_METADATA_FILENAME = "chunking_metadata.json"
+TRANSCRIPTION_METADATA_FILENAME = "transcription_metadata.json"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -30,11 +38,16 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init_parser = subparsers.add_parser("init-episode", help="Create episode working directories.")
-    _add_episode_dirs(init_parser)
+    init_parser.add_argument("episode_dir", type=Path)
+    init_parser.add_argument("--source-dir", required=True, type=Path)
+    init_parser.add_argument("--chunks-dir", required=True, type=Path)
+    init_parser.add_argument("--transcript-dir", type=Path)
     init_parser.set_defaults(func=_cmd_init_episode)
 
     chunk_parser = subparsers.add_parser("chunk", help="Create fixed-length MP3 chunks and a manifest.")
-    _add_episode_dirs(chunk_parser)
+    chunk_parser.add_argument("episode_dir", type=Path)
+    chunk_parser.add_argument("--source-dir", required=True, type=Path)
+    chunk_parser.add_argument("--chunks-dir", required=True, type=Path)
     chunk_parser.add_argument("--source-file", required=True, type=Path)
     chunk_parser.add_argument("--chunk-seconds", type=int, default=180)
     chunk_parser.add_argument("--overlap-seconds", type=int, default=0)
@@ -43,6 +56,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     transcribe_parser = subparsers.add_parser("transcribe", help="Transcribe manifest chunks with OpenAI.")
     transcribe_parser.add_argument("episode_dir", type=Path)
+    transcribe_parser.add_argument("--chunks-dir", required=True, type=Path)
     transcribe_parser.add_argument("--transcript-dir", required=True, type=Path)
     transcribe_parser.add_argument("--profile-file", required=True, type=Path)
     transcribe_parser.add_argument("--profile", required=True)
@@ -55,39 +69,35 @@ def _build_parser() -> argparse.ArgumentParser:
 
     merge_parser = subparsers.add_parser("merge", help="Merge raw ASR JSONL into timestamped Markdown.")
     merge_parser.add_argument("episode_dir", type=Path)
+    merge_parser.add_argument("--chunks-dir", required=True, type=Path)
     merge_parser.add_argument("--transcript-dir", required=True, type=Path)
     merge_parser.set_defaults(func=_cmd_merge)
 
     return parser
 
 
-def _add_episode_dirs(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("episode_dir", type=Path)
-    parser.add_argument("--source-dir", required=True, type=Path)
-    parser.add_argument("--chunks-dir", required=True, type=Path)
-    parser.add_argument("--transcript-dir", required=True, type=Path)
-
-
 def _cmd_init_episode(args: argparse.Namespace) -> int:
     episode_dir = _resolve(args.episode_dir)
     source_dir = _resolve(args.source_dir)
     chunks_dir = _resolve(args.chunks_dir)
-    transcript_dir = _resolve(args.transcript_dir)
+    transcript_dir = _resolve(args.transcript_dir) if args.transcript_dir else None
 
     episode_dir.mkdir(parents=True, exist_ok=True)
     _require_inside(episode_dir, source_dir, "SOURCE_DIR")
     _require_inside(episode_dir, chunks_dir, "CHUNKS_DIR")
-    _require_inside(episode_dir, transcript_dir, "TRANSCRIPT_DIR")
+    if transcript_dir:
+        _require_inside(episode_dir, transcript_dir, "TRANSCRIPT_DIR")
 
     source_dir.mkdir(parents=True, exist_ok=True)
     chunks_dir.mkdir(parents=True, exist_ok=True)
-    transcript_dir.mkdir(parents=True, exist_ok=True)
+    if transcript_dir:
+        transcript_dir.mkdir(parents=True, exist_ok=True)
     print(f"initialized episode directory: {episode_dir}")
     return 0
 
 
 def _cmd_chunk(args: argparse.Namespace) -> int:
-    episode_dir, source_dir, chunks_dir, transcript_dir = _validate_episode_dirs(args)
+    episode_dir, source_dir, chunks_dir = _validate_chunk_dirs(args)
     if args.chunk_seconds <= 0:
         raise RuntimeError("--chunk-seconds must be greater than zero")
     if args.overlap_seconds < 0:
@@ -102,28 +112,24 @@ def _cmd_chunk(args: argparse.Namespace) -> int:
         raise RuntimeError(f"source audio is not a file: {source_file}")
     _require_inside(source_dir, source_file, "SOURCE_AUDIO")
 
-    transcript_dir.mkdir(parents=True, exist_ok=True)
     chunks_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = transcript_dir / "chunks_manifest.jsonl"
-    run_metadata_path = transcript_dir / "transcription_run.json"
-    existing_metadata = _read_json_file_if_exists(run_metadata_path)
+    manifest_path = chunks_dir / CHUNKING_MANIFEST_FILENAME
+    chunking_metadata_path = chunks_dir / CHUNKING_METADATA_FILENAME
+    existing_metadata = _read_json_file_if_exists(chunking_metadata_path)
 
     if manifest_path.exists():
         chunks = read_manifest(manifest_path)
         if _manifest_matches_source(chunks, episode_dir, source_file, args.chunk_seconds, args.overlap_seconds) and not args.force:
-            if existing_metadata and not _run_metadata_matches_chunks(existing_metadata, episode_dir, transcript_dir, chunks):
-                raise RuntimeError("existing transcription_run.json does not match the manifest; rerun chunk with --force")
+            if existing_metadata and not _chunking_metadata_matches_chunks(existing_metadata, episode_dir, chunks_dir, chunks):
+                raise RuntimeError("existing chunking_metadata.json does not match the manifest; rerun chunk with --force")
             _validate_manifest_chunk_files(episode_dir, chunks)
-            metadata = _run_metadata_for_chunks(episode_dir, transcript_dir, chunks)
-            if existing_metadata and existing_metadata.get("transcription"):
-                metadata["transcription"] = existing_metadata["transcription"]
-            _write_json_file_atomic(run_metadata_path, metadata)
+            _write_json_file_atomic(chunking_metadata_path, _chunking_metadata_for_chunks(episode_dir, chunks_dir, chunks))
             print(f"manifest already up to date: {manifest_path}")
             return 0
         if not args.force:
             raise RuntimeError("existing manifest does not match the source file or chunk settings; rerun chunk with --force")
     elif existing_metadata and not args.force:
-        raise RuntimeError("existing transcription_run.json found without a manifest; rerun chunk with --force")
+        raise RuntimeError("existing chunking_metadata.json found without a manifest; rerun chunk with --force")
 
     existing_chunks = sorted(chunks_dir.glob("chunk_*.mp3"))
     if existing_chunks and not args.force:
@@ -139,16 +145,19 @@ def _cmd_chunk(args: argparse.Namespace) -> int:
         force=args.force,
     )
     write_manifest(chunks, manifest_path)
-    _write_json_file_atomic(run_metadata_path, _run_metadata_for_chunks(episode_dir, transcript_dir, chunks))
+    _write_json_file_atomic(chunking_metadata_path, _chunking_metadata_for_chunks(episode_dir, chunks_dir, chunks))
     print(f"wrote {len(chunks)} chunks and manifest: {manifest_path}")
     return 0
 
 
 def _cmd_transcribe(args: argparse.Namespace) -> int:
     episode_dir = _resolve(args.episode_dir)
+    chunks_dir = _resolve(args.chunks_dir)
     transcript_dir = _resolve(args.transcript_dir)
+    _require_inside(episode_dir, chunks_dir, "CHUNKS_DIR")
     _require_inside(episode_dir, transcript_dir, "TRANSCRIPT_DIR")
-    chunks = read_manifest(transcript_dir / "chunks_manifest.jsonl")
+    transcript_dir.mkdir(parents=True, exist_ok=True)
+    chunks = read_manifest(chunks_dir / CHUNKING_MANIFEST_FILENAME)
     selected_chunks = _select_chunks(chunks, args)
     if not selected_chunks:
         raise RuntimeError("no chunks matched the requested selection")
@@ -160,11 +169,12 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
         profile_file = Path(profile.profile_file).relative_to(cwd).as_posix()
     except ValueError:
         profile_file = profile.profile_file
-    raw_asr_path = transcript_dir / "raw_asr.jsonl"
-    run_metadata_path = transcript_dir / "transcription_run.json"
+    raw_asr_path = transcript_dir / TRANSCRIPTION_RAW_ASR_FILENAME
+    transcription_metadata_path = transcript_dir / TRANSCRIPTION_METADATA_FILENAME
     existing_rows = _read_jsonl_if_exists(raw_asr_path)
     run_request = request_settings_for_profile(profile, max(chunk.audio_duration_ms for chunk in selected_chunks) / 1000)
     transcription_metadata = {
+        "schema_version": SCHEMA_VERSION,
         "profile_name": profile.name,
         "profile_sha256": profile.profile_sha256,
         "profile_file": profile_file,
@@ -173,14 +183,20 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
         "prompt_sha256": profile.prompt_sha256,
         "response_format": run_request["response_format"],
         "chunking_strategy": run_request.get("chunking_strategy"),
+        "artifacts": {
+            "chunks_dir": chunks_dir.relative_to(episode_dir).as_posix(),
+            "chunking_manifest_path": (chunks_dir / CHUNKING_MANIFEST_FILENAME).relative_to(episode_dir).as_posix(),
+            "transcript_dir": transcript_dir.relative_to(episode_dir).as_posix(),
+            "transcription_metadata_path": transcription_metadata_path.relative_to(episode_dir).as_posix(),
+            "transcription_raw_asr_path": raw_asr_path.relative_to(episode_dir).as_posix(),
+            "transcription_markdown_path": (transcript_dir / TRANSCRIPTION_MARKDOWN_FILENAME).relative_to(
+                episode_dir
+            ).as_posix(),
+        },
     }
-    existing_metadata = _read_json_file_if_exists(run_metadata_path)
-    if existing_metadata and not args.force:
-        if not _run_metadata_matches_chunks(existing_metadata, episode_dir, transcript_dir, chunks):
-            raise RuntimeError("existing transcription_run.json does not match the manifest; rerun transcribe with --force")
-        previous_transcription = existing_metadata.get("transcription")
-        if previous_transcription and previous_transcription != transcription_metadata:
-            raise RuntimeError("existing transcription_run.json has different transcription settings; rerun transcribe with --force")
+    existing_metadata = _read_json_file_if_exists(transcription_metadata_path)
+    if existing_metadata and existing_metadata != transcription_metadata and not args.force:
+        raise RuntimeError("existing transcription_metadata.json has different transcription settings; rerun transcribe with --force")
 
     if args.force:
         selected_ids = {chunk.chunk_id for chunk in selected_chunks}
@@ -237,32 +253,30 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
         print(f"transcribed: {chunk.chunk_id}")
 
     print(f"transcription complete: {completed} written, {skipped} skipped")
-    run_metadata = _run_metadata_for_chunks(episode_dir, transcript_dir, chunks)
-    run_metadata["transcription"] = transcription_metadata
-    _write_json_file_atomic(run_metadata_path, run_metadata)
+    _write_json_file_atomic(transcription_metadata_path, transcription_metadata)
     return 0
 
 
 def _cmd_merge(args: argparse.Namespace) -> int:
     episode_dir = _resolve(args.episode_dir)
+    chunks_dir = _resolve(args.chunks_dir)
     transcript_dir = _resolve(args.transcript_dir)
+    _require_inside(episode_dir, chunks_dir, "CHUNKS_DIR")
     _require_inside(episode_dir, transcript_dir, "TRANSCRIPT_DIR")
-    merge_raw_asr_to_markdown(episode_dir, transcript_dir)
-    print(f"wrote merged Markdown: {transcript_dir / 'raw_asr.md'}")
+    merge_raw_asr_to_markdown(episode_dir, chunks_dir, transcript_dir)
+    print(f"wrote merged Markdown: {transcript_dir / TRANSCRIPTION_MARKDOWN_FILENAME}")
     return 0
 
 
-def _validate_episode_dirs(args: argparse.Namespace) -> tuple[Path, Path, Path, Path]:
+def _validate_chunk_dirs(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     episode_dir = _resolve(args.episode_dir)
     source_dir = _resolve(args.source_dir)
     chunks_dir = _resolve(args.chunks_dir)
-    transcript_dir = _resolve(args.transcript_dir)
     if not episode_dir.exists():
         raise FileNotFoundError(f"episode directory not found: {episode_dir}")
     _require_inside(episode_dir, source_dir, "SOURCE_DIR")
     _require_inside(episode_dir, chunks_dir, "CHUNKS_DIR")
-    _require_inside(episode_dir, transcript_dir, "TRANSCRIPT_DIR")
-    return episode_dir, source_dir, chunks_dir, transcript_dir
+    return episode_dir, source_dir, chunks_dir
 
 
 def _resolve(path: Path) -> Path:
@@ -312,9 +326,9 @@ def _validate_manifest_chunk_files(episode_dir: Path, chunks: list[Chunk]) -> No
         validate_upload_size(chunk_path)
 
 
-def _run_metadata_for_chunks(episode_dir: Path, transcript_dir: Path, chunks: list[Chunk]) -> dict[str, Any]:
+def _chunking_metadata_for_chunks(episode_dir: Path, chunks_dir: Path, chunks: list[Chunk]) -> dict[str, Any]:
     if not chunks:
-        raise RuntimeError("cannot write transcription_run.json without manifest chunks")
+        raise RuntimeError("cannot write chunking_metadata.json without manifest chunks")
     first = chunks[0]
     chunk_dir = Path(first.audio_path).parent.as_posix()
     return {
@@ -339,21 +353,20 @@ def _run_metadata_for_chunks(episode_dir: Path, transcript_dir: Path, chunks: li
             "bitrate": first.chunk_bitrate,
         },
         "artifacts": {
-            "transcript_dir": transcript_dir.relative_to(episode_dir).as_posix(),
-            "chunks_manifest_path": (transcript_dir / "chunks_manifest.jsonl").relative_to(episode_dir).as_posix(),
-            "raw_asr_path": (transcript_dir / "raw_asr.jsonl").relative_to(episode_dir).as_posix(),
-            "markdown_path": (transcript_dir / "raw_asr.md").relative_to(episode_dir).as_posix(),
+            "chunks_dir": chunks_dir.relative_to(episode_dir).as_posix(),
+            "chunking_manifest_path": (chunks_dir / CHUNKING_MANIFEST_FILENAME).relative_to(episode_dir).as_posix(),
+            "chunking_metadata_path": (chunks_dir / CHUNKING_METADATA_FILENAME).relative_to(episode_dir).as_posix(),
         },
     }
 
 
-def _run_metadata_matches_chunks(
+def _chunking_metadata_matches_chunks(
     metadata: dict[str, Any],
     episode_dir: Path,
-    transcript_dir: Path,
+    chunks_dir: Path,
     chunks: list[Chunk],
 ) -> bool:
-    expected = _run_metadata_for_chunks(episode_dir, transcript_dir, chunks)
+    expected = _chunking_metadata_for_chunks(episode_dir, chunks_dir, chunks)
     return (
         metadata.get("schema_version") == SCHEMA_VERSION
         and metadata.get("source") == expected["source"]

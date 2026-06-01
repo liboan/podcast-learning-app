@@ -22,7 +22,7 @@ This plan intentionally does not support old generated chunk manifests, old raw 
 - [x] (2026-06-01 07:47Z) Wrote this standalone ExecPlan to disk without implementing code.
 - [x] (2026-06-01 08:11Z) Replaced the manifest/raw ASR schema with v2 context-aware rows and clear regenerate-artifacts errors for old rows.
 - [x] (2026-06-01 08:11Z) Added `--overlap-seconds` and deterministic per-chunk ffmpeg extraction with primary and padded audio intervals.
-- [x] (2026-06-01 08:11Z) Added `transcription_run.json` metadata for chunk and transcription settings.
+- [x] (2026-06-01 08:11Z) Added run metadata for chunk and transcription settings.
 - [x] (2026-06-01 08:11Z) Preserved absolute segment timestamps in raw ASR rows when model output includes segment timing.
 - [x] (2026-06-01 08:11Z) Updated Markdown merge output to expose context timing without trimming or de-duplicating raw text.
 - [x] (2026-06-01 08:11Z) Updated README examples and tests for v2 manifests, context chunking, stale overlap detection, segment timing, merge output, and run metadata.
@@ -37,16 +37,24 @@ This plan intentionally does not support old generated chunk manifests, old raw 
 - [x] (2026-06-01 08:28Z) Removed legacy direct `transcribe --model`, `--language`, and `--prompt-file` flags instead of maintaining compatibility paths.
 - [x] (2026-06-01 08:28Z) Ran `PYTHONPATH=src python3 -m pytest tests`; all 9 tests passed.
 - [x] (2026-06-01 08:32Z) Simplified `profiles.py` again after user review so it just loads a named YAML profile, resolves optional prompt text, fingerprints the file/name, and passes arbitrary options through.
-- [x] (2026-06-01 08:36Z) Renamed checked-in example profiles to `4o-transcribe` and `4o-transcribe-diarize`, removed the Japanese PF2e prompt file, and omitted prompts from example profiles.
+- [x] (2026-06-01 08:36Z) Renamed checked-in example profiles to `4o-transcribe` and `4o-transcribe-diarize` and removed the separate Japanese PF2e prompt file.
 - [x] (2026-06-01 08:44Z) Changed prompt support to inline plaintext YAML strings and removed prompt-path loading.
+- [x] (2026-06-01 09:08Z) Split chunking and transcription artifacts into `chunking_manifest.jsonl` / `chunking_metadata.json` and `transcription_raw_asr.jsonl` / `transcription_metadata.json` / `transcription_raw_asr.md` with no legacy filename reads.
+- [x] (2026-06-01 09:08Z) Ran `PYTHONPATH=src python3 -m pytest tests`; all 9 tests passed after the metadata/file split.
+- [x] (2026-06-01 09:16Z) Moved chunking metadata and manifests into the chunks directory, made transcription outputs live only in transcript directories, and required `--chunks-dir` for `transcribe` and `merge`.
+- [x] (2026-06-01 09:16Z) Ran `PYTHONPATH=src python3 -m pytest tests`; all 9 tests passed after the output-location split.
+- [x] (2026-06-01 09:27Z) Moved the live episode's existing `chunks_manifest.jsonl` / `transcription_run.json` files from `asr_30s_ctx5` and `asr_600s_ctx30` into their matching chunk dirs as `chunking_manifest.jsonl` / `chunking_metadata.json`, then validated both with the new `chunk` command.
 
 ## Surprises & Discoveries
 
 - Observation: The current pipeline already accepts explicit `CHUNKS_DIR` and `TRANSCRIPT_DIR`, so multiple raw outputs can be supported without a run registry.
   Evidence: `podcast-transcriber chunk` and `transcribe` already route artifacts through caller-provided directories.
 
-- Observation: Current chunk filenames and chunk IDs are local to one chosen chunk directory and transcript directory.
-  Evidence: `audio.py` writes `chunk_000001.mp3`, and `merge.py` reads one `chunks_manifest.jsonl` plus one `raw_asr.jsonl`.
+- Observation: Current chunk filenames and chunk IDs are local to one chosen chunk directory.
+  Evidence: `audio.py` writes `chunk_000001.mp3`, and `merge.py` reads one `chunking_manifest.jsonl` plus one `transcription_raw_asr.jsonl`.
+
+- Observation: Keeping chunking artifacts with chunk MP3s supports disposable transcription experiments.
+  Evidence: `transcribe` can now create a missing transcript directory from an existing `--chunks-dir`, so sample transcription outputs can be deleted without touching chunk MP3s, `chunking_manifest.jsonl`, or `chunking_metadata.json`.
 
 - Observation: Current OpenAI docs say `gpt-4o-transcribe-diarize` returns speaker segments with `speaker`, `start`, and `end` in `diarized_json`, requires `chunking_strategy` for inputs longer than 30 seconds, and does not support prompts.
   Evidence: Official docs at `https://developers.openai.com/api/docs/guides/speech-to-text#speaker-diarization`.
@@ -73,7 +81,7 @@ This plan intentionally does not support old generated chunk manifests, old raw 
   Date/Author: 2026-06-01 / planning.
 
 - Decision: One transcript directory represents one coherent raw ASR output.
-  Rationale: Mixing different chunk strategies or models in the same `raw_asr.jsonl` makes comparison and downstream cleaning harder. If model, prompt, language, or chunk settings differ, the caller should use a different transcript directory or pass `--force`.
+  Rationale: Mixing different chunk strategies or models in the same `transcription_raw_asr.jsonl` makes comparison and downstream cleaning harder. If model, prompt, language, or chunk settings differ, the caller should use a different transcript directory or pass `--force`.
   Date/Author: 2026-06-01 / planning.
 
 - Decision: Add symmetrical context padding with `--overlap-seconds N`, defaulting to zero.
@@ -96,8 +104,8 @@ This plan intentionally does not support old generated chunk manifests, old raw 
   Rationale: `.agent/PLANS.md` is the repository's ExecPlan instruction file, not the feature plan. Keeping this plan next to the transcription pipeline makes it easy for a future implementer to find without overwriting repository guidance.
   Date/Author: 2026-06-01 / planning.
 
-- Decision: Store `transcription_run.json` as a compact source, chunk, artifact, and transcription settings record derived from the manifest.
-  Rationale: The manifest remains the detailed row-level source of truth, while the run metadata makes each transcript directory self-describing without duplicating every chunk row.
+- Decision: Store chunking and transcription metadata in separate files.
+  Rationale: Chunking and transcription are separate pipeline stages. `chunking_metadata.json` should describe source/chunk artifacts, while `transcription_metadata.json` should describe profile/request artifacts without mutating chunking metadata.
   Date/Author: 2026-06-01 / implementation.
 
 - Decision: For the live episode run, use the episode directory itself as `--source-dir`.
@@ -128,23 +136,41 @@ This plan intentionally does not support old generated chunk manifests, old raw 
   Rationale: The YAML file is the source of truth. The code should load the named profile, read an optional inline prompt string, fingerprint the profile file and name, and pass through arbitrary fields/options rather than trying to police every possible future model shape.
   Date/Author: 2026-06-01 / implementation after user review.
 
-- Decision: Omit prompts from checked-in example profiles.
-  Rationale: Prompt text is not settled yet. The model profiles should only establish model, language, response format, and options until a prompt is intentionally authored later.
+- Decision: Keep prompts inline and only on profiles that should send them.
+  Rationale: `gpt-4o-transcribe` can use a prompt, while `gpt-4o-transcribe-diarize` should not include one. Inline YAML avoids a separate prompt-loader path.
   Date/Author: 2026-06-01 / implementation after user review.
 
 - Decision: Store prompts inline in YAML profiles.
   Rationale: A separate prompt file loader made profile handling more complex than needed. If a profile needs a prompt later, it should use a plain `prompt: "..."` string in the YAML file.
   Date/Author: 2026-06-01 / implementation after user review.
 
+- Decision: Rename generated files around stage ownership.
+  Rationale: `chunking_manifest.jsonl` and `chunking_metadata.json` are chunking-stage outputs. `transcription_raw_asr.jsonl`, `transcription_metadata.json`, and `transcription_raw_asr.md` are transcription-stage outputs. The pipeline should not keep reads or writes for the old names.
+  Date/Author: 2026-06-01 / implementation after user review.
+
+- Decision: Store chunking artifacts under `CHUNKS_DIR`, not `TRANSCRIPT_DIR`.
+  Rationale: Chunk MP3s, their manifest, and chunking metadata form one reusable chunk set. Transcription directories should be disposable so sample/profile tests can be removed without deleting the chunk set.
+  Date/Author: 2026-06-01 / implementation after user review.
+
 ## Outcomes & Retrospective
 
-The context-padding milestone is implemented. The CLI now accepts `podcast-transcriber chunk ... --overlap-seconds N`, writes schema version 2 manifests with primary and padded audio intervals, writes `transcription_run.json`, enriches timed ASR segments with relative and absolute millisecond timestamps, and renders Markdown with primary interval headers plus audio interval and context metadata. Old generated manifest/raw rows are rejected with clear regeneration guidance instead of being migrated.
+The context-padding milestone is implemented. The CLI now accepts `podcast-transcriber chunk ... --overlap-seconds N`, writes schema version 2 manifests with primary and padded audio intervals, writes chunking/transcription metadata, enriches timed ASR segments with relative and absolute millisecond timestamps, and renders Markdown with primary interval headers plus audio interval and context metadata. Old generated manifest/raw rows are rejected with clear regeneration guidance instead of being migrated.
 
-Validation passed with `PYTHONPATH=src python3 -m pytest tests` showing 6 passing tests. The synthetic ffmpeg smoke test also passed. The requested live episode was initialized and chunked into `chunks_30s_ctx5` / `asr_30s_ctx5` and `chunks_600s_ctx30` / `asr_600s_ctx30` without model transcription. The 30s/5s run produced 430 chunks, and the 600s/30s run produced 22 chunks. No `raw_asr.jsonl` file exists in either transcript directory, confirming that audio was not sent to a transcription model.
+Validation passed with `PYTHONPATH=src python3 -m pytest tests` showing 6 passing tests. The synthetic ffmpeg smoke test also passed. The requested live episode was initialized and chunked into `chunks_30s_ctx5` / `asr_30s_ctx5` and `chunks_600s_ctx30` / `asr_600s_ctx30` without model transcription. The 30s/5s run produced 430 chunks, and the 600s/30s run produced 22 chunks. No transcription raw ASR file exists in either transcript directory, confirming that audio was not sent to a transcription model.
 
 The YAML model-profile milestone is implemented. `transcribe` now requires `--profile-file` and `--profile`; direct `--model`, `--language`, and `--prompt-file` flags were removed. Profiles are loaded from YAML with `yaml.safe_load`, named profile lookup, optional inline prompt text, generic option pass-through, and profile-file fingerprinting. The OpenAI wrapper now receives an already resolved request dictionary and no longer imports or compares against a diarization model constant.
 
-Validation passed with `PYTHONPATH=src python3 -m pytest tests` showing 9 passing tests. The tests cover example profile loading with omitted prompts, generic conditional options for diarization chunking, arbitrary option pass-through, profile metadata in `transcription_run.json` and `raw_asr.jsonl`, and profile fingerprint mismatch behavior on resume. No live model/API calls were made.
+Validation passed with `PYTHONPATH=src python3 -m pytest tests` showing 9 passing tests. The tests cover example profile loading, generic conditional options for diarization chunking, arbitrary option pass-through, profile metadata in `transcription_metadata.json` and `transcription_raw_asr.jsonl`, and profile fingerprint mismatch behavior on resume. No live model/API calls were made.
+
+The metadata/file naming split is implemented. Chunking now writes `chunking_manifest.jsonl` and `chunking_metadata.json`. Transcription reads that manifest, writes `transcription_raw_asr.jsonl` and `transcription_metadata.json`, and merge rewrites `transcription_raw_asr.md`. The code does not read or write the old `chunks_manifest.jsonl`, `raw_asr.jsonl`, `raw_asr.md`, or `transcription_run.json` filenames.
+
+Validation passed with `PYTHONPATH=src python3 -m pytest tests` showing 9 passing tests after the split. `git diff --check -- podcast-transcription-pipeline` also passed.
+
+The output-location split is implemented. `chunk` now writes MP3 chunks, `chunking_manifest.jsonl`, and `chunking_metadata.json` into `CHUNKS_DIR`. `transcribe` and `merge` require both `--chunks-dir` and `--transcript-dir`; transcription writes only `transcription_raw_asr.jsonl`, `transcription_metadata.json`, and `transcription_raw_asr.md` into `TRANSCRIPT_DIR`. `transcribe` creates a missing transcript directory so disposable sample transcription directories can be deleted and recreated without touching the chunking output.
+
+Validation passed with `PYTHONPATH=src python3 -m pytest tests` showing 9 passing tests after the output-location split.
+
+The previously generated live episode chunking artifacts were moved to match the new layout. `chunks_30s_ctx5` and `chunks_600s_ctx30` now each contain `chunking_manifest.jsonl` and `chunking_metadata.json`; the old `asr_30s_ctx5/chunks_manifest.jsonl`, `asr_30s_ctx5/transcription_run.json`, `asr_600s_ctx30/chunks_manifest.jsonl`, and `asr_600s_ctx30/transcription_run.json` files are gone. Both chunk dirs validated as already up to date with the new CLI and no transcription/API call was made.
 
 ## Context and Orientation
 
@@ -195,7 +221,7 @@ Replace the ffmpeg segment muxer approach in `audio.py` with deterministic per-c
 
 Run ffmpeg once per chunk with `-ss`, `-t`, mono 16 kHz MP3, `libmp3lame`, and `64k`. Continue to validate every generated MP3 against the 25 MB upload limit. With zero overlap, new runs should have primary intervals equivalent to the old fixed chunking behavior, but the manifest schema is still v2 only.
 
-Add `transcription_run.json` in every transcript directory. `chunk` creates or updates it with source metadata, chunk settings, relative artifact paths, and schema version. `transcribe` updates it with model, language, prompt hash, response format, and chunking strategy. If an existing run metadata file describes incompatible settings, fail clearly unless `--force` is used.
+Add `chunking_metadata.json` in every chunks directory. `chunk` creates or updates it with source metadata, chunk settings, relative artifact paths, and schema version. Add `transcription_metadata.json` in every transcript directory for the transcription stage with model, language, prompt hash, response format, chunking strategy, and transcription artifact paths. If an existing stage metadata file describes incompatible settings, fail clearly unless `--force` is used.
 
 In `cli.py`, normalize model-returned segments before writing each raw ASR row. Preserve the original segment fields. When a segment has numeric `start` and `end` values, treat them as seconds relative to the uploaded chunk audio and add:
 
@@ -226,7 +252,8 @@ Create `podcast-transcription-pipeline/transcription_profiles.example.yaml` with
         endpoint: audio.transcriptions
         model: gpt-4o-transcribe
         response_format: json
-        language: ja
+        language: cn
+        prompt: "Transcribe this Chinese-language PF2e actual play podcast. Things to note while you transcribe: multiple speakers, Pathfinder 2e mechanics and lore, transliteration of terms, character names"
         options: {}
 
       4o-transcribe-diarize:
@@ -234,13 +261,13 @@ Create `podcast-transcription-pipeline/transcription_profiles.example.yaml` with
         endpoint: audio.transcriptions
         model: gpt-4o-transcribe-diarize
         response_format: diarized_json
-        language: ja
+        language: cn
         options:
           chunking_strategy:
             value: auto
             when_audio_seconds_gt: 30
 
-Omit prompts from the checked-in example profiles for now. If a profile needs a prompt later, put the prompt plaintext directly in the YAML string.
+Put prompt text directly in the YAML string only for profiles that should send a prompt. Do not add prompt fields to profiles for models that do not support prompts.
 
 Add `PyYAML>=6.0` to `pyproject.toml`. Use `yaml.safe_load` only. Keep profile loading thin: find the named profile under `profiles`, read optional inline prompt text, fingerprint the profile file plus profile name, and otherwise pass profile fields through.
 
@@ -256,9 +283,9 @@ Add a new module, `src/podcast_transcriber/profiles.py`, with a dataclass or sma
 
 Update `transcribe` CLI to prefer profiles:
 
-    podcast-transcriber transcribe EPISODE_DIR --transcript-dir TRANSCRIPT_DIR --profile-file transcription_profiles.example.yaml --profile 4o-transcribe
+    podcast-transcriber transcribe EPISODE_DIR --chunks-dir CHUNKS_DIR --transcript-dir TRANSCRIPT_DIR --profile-file transcription_profiles.example.yaml --profile 4o-transcribe
 
-    podcast-transcriber transcribe EPISODE_DIR --transcript-dir TRANSCRIPT_DIR --profile-file transcription_profiles.example.yaml --profile 4o-transcribe-diarize
+    podcast-transcriber transcribe EPISODE_DIR --chunks-dir CHUNKS_DIR --transcript-dir TRANSCRIPT_DIR --profile-file transcription_profiles.example.yaml --profile 4o-transcribe-diarize
 
 The profile is the source of truth for `model`, `language`, `response_format`, prompt behavior, and model-specific `options`. Do not keep special cases in `openai_client.py` for diarization. `openai_client.py` should receive the resolved request settings and submit them to the OpenAI SDK.
 
@@ -268,7 +295,7 @@ When a profile has a non-empty `prompt` string, send that string to the transcri
 
 When a profile option is written as a mapping with `value` and `when_audio_seconds_gt`, send that option only for uploaded chunk audio longer than the threshold. This reproduces the current diarization behavior without hard-coding the diarization model in Python while still allowing arbitrary future OpenAI request options to pass through.
 
-Update `transcription_run.json` and each raw ASR row to include `profile_name`, `profile_sha256`, `profile_file`, `model`, `language`, `prompt_sha256`, `response_format`, and resolved model options such as `chunking_strategy`. Use relative paths where possible. Resuming should skip existing rows only when the chunk metadata and resolved profile metadata still match.
+Update `transcription_metadata.json` and each raw ASR row to include `profile_name`, `profile_sha256`, `profile_file`, `model`, `language`, `prompt_sha256`, `response_format`, and resolved model options such as `chunking_strategy`. Use relative paths where possible. Resuming should skip existing rows only when the chunk metadata and resolved profile metadata still match.
 
 ## Concrete Steps
 
@@ -310,18 +337,18 @@ Example intended usage for one output:
     TRANSCRIPT_DIR=test_episode/asr_gpt4o_180s_ctx20
 
     podcast-transcriber init-episode "$EPISODE_DIR" --source-dir "$SOURCE_DIR" --chunks-dir "$CHUNKS_DIR" --transcript-dir "$TRANSCRIPT_DIR"
-    podcast-transcriber chunk "$EPISODE_DIR" --source-dir "$SOURCE_DIR" --source-file "$SOURCE_DIR/episode.mp3" --chunks-dir "$CHUNKS_DIR" --transcript-dir "$TRANSCRIPT_DIR" --chunk-seconds 180 --overlap-seconds 20
-    podcast-transcriber transcribe "$EPISODE_DIR" --transcript-dir "$TRANSCRIPT_DIR" --profile-file transcription_profiles.example.yaml --profile 4o-transcribe
-    podcast-transcriber merge "$EPISODE_DIR" --transcript-dir "$TRANSCRIPT_DIR"
+    podcast-transcriber chunk "$EPISODE_DIR" --source-dir "$SOURCE_DIR" --source-file "$SOURCE_DIR/episode.mp3" --chunks-dir "$CHUNKS_DIR" --chunk-seconds 180 --overlap-seconds 20
+    podcast-transcriber transcribe "$EPISODE_DIR" --chunks-dir "$CHUNKS_DIR" --transcript-dir "$TRANSCRIPT_DIR" --profile-file transcription_profiles.example.yaml --profile 4o-transcribe
+    podcast-transcriber merge "$EPISODE_DIR" --chunks-dir "$CHUNKS_DIR" --transcript-dir "$TRANSCRIPT_DIR"
 
 Example intended usage for a second raw output:
 
     CHUNKS_DIR=test_episode/chunks_60s_ctx20_diarize
     TRANSCRIPT_DIR=test_episode/asr_diarize_60s_ctx20
 
-    podcast-transcriber chunk "$EPISODE_DIR" --source-dir "$SOURCE_DIR" --source-file "$SOURCE_DIR/episode.mp3" --chunks-dir "$CHUNKS_DIR" --transcript-dir "$TRANSCRIPT_DIR" --chunk-seconds 60 --overlap-seconds 20
-    podcast-transcriber transcribe "$EPISODE_DIR" --transcript-dir "$TRANSCRIPT_DIR" --profile-file transcription_profiles.example.yaml --profile 4o-transcribe-diarize
-    podcast-transcriber merge "$EPISODE_DIR" --transcript-dir "$TRANSCRIPT_DIR"
+    podcast-transcriber chunk "$EPISODE_DIR" --source-dir "$SOURCE_DIR" --source-file "$SOURCE_DIR/episode.mp3" --chunks-dir "$CHUNKS_DIR" --chunk-seconds 60 --overlap-seconds 20
+    podcast-transcriber transcribe "$EPISODE_DIR" --chunks-dir "$CHUNKS_DIR" --transcript-dir "$TRANSCRIPT_DIR" --profile-file transcription_profiles.example.yaml --profile 4o-transcribe-diarize
+    podcast-transcriber merge "$EPISODE_DIR" --chunks-dir "$CHUNKS_DIR" --transcript-dir "$TRANSCRIPT_DIR"
 
 The future knowledge builder should be invoked with both transcript directories explicitly. Do not add directory scanning or an episode index in this plan.
 
@@ -339,12 +366,13 @@ Add tests that prove:
 - Changing `--overlap-seconds` makes an existing manifest stale unless `--force` is used.
 - Raw ASR segment normalization converts relative segment times to absolute source times using `audio_start_ms`.
 - Markdown merge renders primary interval, audio interval, context lengths, and timed segment lines without dropping context text.
-- `transcription_run.json` is created and records source, chunk, model, language, prompt hash, and artifact paths.
+- `chunking_metadata.json` is created in `CHUNKS_DIR` and records source, chunk settings, and chunking artifact paths.
+- `transcription_metadata.json` is created and records profile name/hash, model, language, prompt hash, response format, resolved options, and transcription artifact paths.
 - YAML profiles load from `transcription_profiles.example.yaml`.
-- The `4o-transcribe` profile resolves `model`, `language`, and `response_format`, with no prompt.
+- The `4o-transcribe` profile resolves `model`, `language`, `response_format`, and an inline prompt when present.
 - The `4o-transcribe-diarize` profile resolves `response_format: diarized_json`, does not send prompts, and resolves `chunking_strategy: auto` only when uploaded audio duration is greater than 30 seconds.
 - YAML profiles load from the named entry and pass arbitrary provider, endpoint, and option keys through without model-specific validation.
-- `transcribe` writes `profile_name`, `profile_sha256`, `profile_file`, resolved model settings, and `prompt_sha256` into `transcription_run.json` and `raw_asr.jsonl`.
+- `transcribe` writes `profile_name`, `profile_sha256`, `profile_file`, resolved model settings, and `prompt_sha256` into `transcription_metadata.json` and `transcription_raw_asr.jsonl`.
 - Existing rows are skipped only when profile metadata still matches; changing the YAML profile file forces retranscription unless `--force` rewrites selected rows.
 
 Run a synthetic smoke test if ffmpeg is available:
@@ -353,21 +381,21 @@ Run a synthetic smoke test if ffmpeg is available:
     SOURCE_DIR="$EPISODE_DIR/source"
     CHUNKS_DIR="$EPISODE_DIR/chunks_ctx2"
     TRANSCRIPT_DIR="$EPISODE_DIR/asr_ctx2"
-    podcast-transcriber init-episode "$EPISODE_DIR" --source-dir "$SOURCE_DIR" --chunks-dir "$CHUNKS_DIR" --transcript-dir "$TRANSCRIPT_DIR"
+    podcast-transcriber init-episode "$EPISODE_DIR" --source-dir "$SOURCE_DIR" --chunks-dir "$CHUNKS_DIR"
     ffmpeg -hide_banner -loglevel error -f lavfi -i sine=frequency=1000:duration=7 -ar 16000 -ac 1 "$SOURCE_DIR/synthetic.wav"
-    podcast-transcriber chunk "$EPISODE_DIR" --source-dir "$SOURCE_DIR" --source-file "$SOURCE_DIR/synthetic.wav" --chunks-dir "$CHUNKS_DIR" --transcript-dir "$TRANSCRIPT_DIR" --chunk-seconds 3 --overlap-seconds 1
+    podcast-transcriber chunk "$EPISODE_DIR" --source-dir "$SOURCE_DIR" --source-file "$SOURCE_DIR/synthetic.wav" --chunks-dir "$CHUNKS_DIR" --chunk-seconds 3 --overlap-seconds 1
 
-Expected result: command exits 0, chunks are created, `chunks_manifest.jsonl` exists, and rows show audio intervals larger than primary intervals except where capped by source boundaries.
+Expected result: command exits 0, chunks are created, `chunking_manifest.jsonl` exists, and rows show audio intervals larger than primary intervals except where capped by source boundaries.
 
 Acceptance is complete when overlap runs produce self-describing timestamp-aware raw artifacts, multiple raw outputs can coexist by using separate directories, old generated artifacts are rejected rather than migrated, and all tests pass.
 
 ## Idempotence and Recovery
 
-`init-episode` remains safe to rerun. `chunk` remains safe to rerun with matching source and chunk settings. If source metadata, `chunk_seconds`, or `overlap_seconds` differ, fail unless `--force` is passed. `transcribe` resumes by matching source, chunk, overlap, profile name, profile hash, model, language, prompt hash, response format, and resolved options such as chunking strategy. `merge` remains safe to rerun and rewrites only `raw_asr.md`.
+`init-episode` remains safe to rerun. `chunk` remains safe to rerun with matching source and chunk settings. If source metadata, `chunk_seconds`, or `overlap_seconds` differ, fail unless `--force` is passed. `transcribe` resumes by matching source, chunk, overlap, profile name, profile hash, model, language, prompt hash, response format, and resolved options such as chunking strategy. `merge` remains safe to rerun and rewrites only `transcription_raw_asr.md`.
 
 If old generated artifacts are present, do not migrate them. Archive or delete the old chunk/transcript directories, then rerun `chunk`, `transcribe`, and `merge`.
 
-If per-chunk ffmpeg extraction fails halfway, rerun with `--force` to regenerate the transcript directory's chunks and manifest. Source audio must never be deleted.
+If per-chunk ffmpeg extraction fails halfway, rerun with `--force` to regenerate the chunks directory's MP3 chunks and manifest. Source audio must never be deleted.
 
 ## Interfaces and Dependencies
 
@@ -377,7 +405,7 @@ Public CLI additions:
 
     podcast-transcriber chunk ... [--overlap-seconds N]
 
-    podcast-transcriber transcribe EPISODE_DIR --transcript-dir TRANSCRIPT_DIR --profile-file PROFILE_YAML --profile PROFILE_NAME
+    podcast-transcriber transcribe EPISODE_DIR --chunks-dir CHUNKS_DIR --transcript-dir TRANSCRIPT_DIR --profile-file PROFILE_YAML --profile PROFILE_NAME
 
 Updated function signature:
 
@@ -428,7 +456,7 @@ Relevant constraints to preserve through YAML profile defaults:
 
 - `gpt-4o-transcribe-diarize` should request `diarized_json` to receive speaker segments.
 - `gpt-4o-transcribe-diarize` requires `chunking_strategy` for inputs longer than 30 seconds and `"auto"` is appropriate.
-- Prompts are omitted from the checked-in example profiles for now.
+- Prompts are inline YAML strings and omitted from profiles whose models do not support prompts.
 - Segment timestamps from diarized output are relative to the uploaded chunk audio, so absolute source timestamps must add `audio_start_ms`.
 
 ## Revision Notes
@@ -443,6 +471,6 @@ Relevant constraints to preserve through YAML profile defaults:
 
 2026-06-01: Simplified profile loading again after user review. `profiles.py` now avoids provider/endpoint/schema policing and behaves as a thin YAML loader plus optional prompt resolver and request-option builder.
 
-2026-06-01: Removed the checked-in Japanese PF2e prompt and changed the example profile names to `4o-transcribe` and `4o-transcribe-diarize`. The example profiles now omit prompts.
+2026-06-01: Removed the separate checked-in Japanese PF2e prompt file and changed the example profile names to `4o-transcribe` and `4o-transcribe-diarize`.
 
 2026-06-01: Removed prompt-path loading. Profiles now use a plain inline `prompt` YAML string, with empty strings treated as no prompt.
