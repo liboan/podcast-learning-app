@@ -128,7 +128,14 @@ profiles:
             "chunking_strategy": None,
             "text": "hello",
             "segments": [{"speaker": "S1", "start": 1.5, "end": 4.5, "text": "hello"}],
-            "raw_response": {"text": "hello"},
+            "raw_response": {
+                "text": "hello",
+                "usage": {
+                    "input_tokens": 11,
+                    "output_tokens": 3,
+                    "total_tokens": 14,
+                },
+            },
         }
 
     monkeypatch.setattr(cli, "transcribe_audio_file", fake_transcribe_audio_file)
@@ -174,10 +181,23 @@ profiles:
             "transcription_raw_asr_path": "asr_ctx2/transcription_raw_asr.jsonl",
             "transcription_markdown_path": "asr_ctx2/transcription_raw_asr.md",
         },
+        "transcriptions": [
+            {
+                "chunk_id": "chunk_000001",
+                "chunk_filename": "chunk_000001.mp3",
+                "audio_path": "chunks_ctx2/chunk_000001.mp3",
+                "token_usage": {
+                    "input_tokens": 11,
+                    "output_tokens": 3,
+                    "total_tokens": 14,
+                },
+            }
+        ],
     }
     assert row["profile_name"] == "4o-transcribe"
     assert row["profile_sha256"] == transcription["profile_sha256"]
     assert row["profile_file"] == transcription["profile_file"]
+    assert row["raw_response"]["usage"] == transcription["transcriptions"][0]["token_usage"]
 
 
 def test_transcribe_profile_fingerprint_controls_resume(
@@ -214,7 +234,14 @@ profiles:
             "chunking_strategy": None,
             "text": "hello",
             "segments": None,
-            "raw_response": {"text": "hello"},
+            "raw_response": {
+                "text": "hello",
+                "usage": {
+                    "input_tokens": 5,
+                    "output_tokens": 2,
+                    "total_tokens": 7,
+                },
+            },
         }
 
     monkeypatch.setattr(cli, "transcribe_audio_file", fake_transcribe_audio_file)
@@ -232,6 +259,9 @@ profiles:
     ]
 
     assert cli.main(argv) == 0
+    metadata = json.loads((transcript_dir / "transcription_metadata.json").read_text(encoding="utf-8"))
+    metadata["extra_metadata_field"] = {"ignored_by_settings_comparison": True}
+    (transcript_dir / "transcription_metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
     assert cli.main(argv) == 0
     profile_file.write_text(profile_text + "\n", encoding="utf-8")
     assert cli.main(argv) == 1

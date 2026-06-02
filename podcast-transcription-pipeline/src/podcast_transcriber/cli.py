@@ -20,6 +20,18 @@ from .profiles import load_profile, request_settings_for_profile
 
 CHUNKING_METADATA_FILENAME = "chunking_metadata.json"
 TRANSCRIPTION_METADATA_FILENAME = "transcription_metadata.json"
+TRANSCRIPTION_METADATA_SETTINGS_KEYS = (
+    "schema_version",
+    "profile_name",
+    "profile_sha256",
+    "profile_file",
+    "model",
+    "language",
+    "prompt_sha256",
+    "response_format",
+    "chunking_strategy",
+    "artifacts",
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -173,7 +185,7 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
     transcription_metadata_path = transcript_dir / TRANSCRIPTION_METADATA_FILENAME
     existing_rows = _read_jsonl_if_exists(raw_asr_path)
     run_request = request_settings_for_profile(profile, max(chunk.audio_duration_ms for chunk in selected_chunks) / 1000)
-    transcription_metadata = {
+    transcription_metadata_settings = {
         "schema_version": SCHEMA_VERSION,
         "profile_name": profile.name,
         "profile_sha256": profile.profile_sha256,
@@ -194,8 +206,15 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
             ).as_posix(),
         },
     }
+    metadata_compare_settings = {
+        key: transcription_metadata_settings[key] for key in TRANSCRIPTION_METADATA_SETTINGS_KEYS
+    }
     existing_metadata = _read_json_file_if_exists(transcription_metadata_path)
-    if existing_metadata and existing_metadata != transcription_metadata and not args.force:
+    if (
+        existing_metadata
+        and {key: existing_metadata.get(key) for key in TRANSCRIPTION_METADATA_SETTINGS_KEYS} != metadata_compare_settings
+        and not args.force
+    ):
         raise RuntimeError("existing transcription_metadata.json has different transcription settings; rerun transcribe with --force")
 
     if args.force:
@@ -253,6 +272,18 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
         print(f"transcribed: {chunk.chunk_id}")
 
     print(f"transcription complete: {completed} written, {skipped} skipped")
+    transcription_metadata = dict(transcription_metadata_settings)
+    transcription_metadata["transcriptions"] = []
+    for row in sorted(existing_rows, key=lambda raw_asr_row: raw_asr_row.get("chunk_index", 0)):
+        raw_response = row.get("raw_response") if isinstance(row.get("raw_response"), dict) else {}
+        transcription_metadata["transcriptions"].append(
+            {
+                "chunk_id": row["chunk_id"],
+                "chunk_filename": Path(row["audio_path"]).name,
+                "audio_path": row["audio_path"],
+                "token_usage": raw_response.get("usage"),
+            }
+        )
     _write_json_file_atomic(transcription_metadata_path, transcription_metadata)
     return 0
 
