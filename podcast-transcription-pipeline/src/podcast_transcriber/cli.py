@@ -526,10 +526,10 @@ def enrich_segments_with_absolute_times(segments: list[dict[str, Any]] | None, c
 
 
 def _load_local_env() -> None:
-    candidates = [Path.cwd() / ".env", Path(__file__).resolve().parents[2] / ".env"]
-    for candidate in candidates:
-        if candidate.exists():
-            _load_env_file(candidate)
+    pipeline_root = Path(__file__).resolve().parents[2]
+    candidate = pipeline_root.parent / ".env"
+    if candidate.exists():
+        _load_env_file(candidate)
 
 
 def _load_env_file(path: Path) -> None:

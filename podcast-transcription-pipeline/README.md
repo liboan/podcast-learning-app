@@ -16,8 +16,14 @@ python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
-Set `OPENAI_API_KEY` in your shell, or create a local `.env` file from
-`.env.example`. Local `.env` files are ignored by git.
+Set `OPENAI_API_KEY` and `OPENAI_ADMIN_KEY` in your shell, or copy this
+directory's `.env.example` to `.env` in the main project root. Local `.env`
+files are ignored by git.
+
+For this local workspace, store shared secrets in the main project `.env`. The
+CLI automatically loads only that main project root `.env`; nested pipeline
+`.env` files are ignored. Do not print, copy, grep, or otherwise inspect key
+values.
 
 ## Usage
 
