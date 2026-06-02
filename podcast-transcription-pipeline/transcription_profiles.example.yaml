@@ -5,7 +5,7 @@ profiles:
     endpoint: audio.transcriptions
     model: gpt-4o-transcribe
     response_format: json
-    language: cn
+    language: zh
     prompt: "Transcribe this Chinese-language PF2e actual play podcast. Things to note while you transcribe: multiple speakers, Pathfinder 2e mechanics and lore, transliteration of terms, character names"
     options: {}
 
@@ -14,7 +14,7 @@ profiles:
     endpoint: audio.transcriptions
     model: gpt-4o-transcribe-diarize
     response_format: diarized_json
-    language: cn
+    language: zh
     options:
       chunking_strategy:
         value: auto

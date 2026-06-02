@@ -107,6 +107,13 @@ transcribes into disposable directories such as `asr_sample_gpt4o` before
 running a full transcription into `asr_gpt4o_180s_ctx20`. `transcribe` creates
 the transcript directory when it is missing.
 
+For sampled 600-second context-padded comparisons, reuse the durable
+`chunks_600s_ctx30` directory and write each profile into its own transcript
+directory. For example, transcribe well-separated chunks such as `chunk_000006`
+and `chunk_000017` into separate directories like
+`asr_sample_600s_ctx30_4o_transcribe` and
+`asr_sample_600s_ctx30_4o_transcribe_diarize`.
+
 Old generated chunks, manifests, and raw transcript rows are not migrated.
 Discard or archive those generated directories and rerun `chunk`, `transcribe`,
 and `merge` to produce schema version 2 artifacts.
